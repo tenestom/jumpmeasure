@@ -299,14 +299,44 @@
       frameInfo.textContent = '';
     });
 
+    calibBtn.addEventListener('click', () => {
+      calibrateMode = !calibrateMode;
+      calibBtn.style.background = calibrateMode ? '#2ecc71' : '#e67e22';
+      frameInfo.textContent = calibrateMode ? 'Calibration ON. Click to add points.' : '';
+    });
+
+    clearCalibBtn.addEventListener('click', () => {
+      calibPoints = [];
+    });
+
+    function handleInteraction(clientX) {
+      if (calibrateMode) {
+        let x = getCanvasX(clientX);
+        let m = prompt('Enter real-world distance for this point (in meters):');
+        if (m !== null && !isNaN(parseFloat(m))) {
+          calibPoints.push({ x: x, meters: parseFloat(m) });
+          calibPoints.sort((a, b) => a.x - b.x);
+        }
+      } else {
+        dragging = true;
+        lineX = getCanvasX(clientX);
+      }
+    }
+
     // Mouse events
-    canvas.addEventListener('mousedown', e => { dragging = true; lineX = getCanvasX(e.clientX); });
-    canvas.addEventListener('mousemove', e => { if (dragging) lineX = getCanvasX(e.clientX); });
+    canvas.addEventListener('mousedown', e => { handleInteraction(e.clientX); });
+    canvas.addEventListener('mousemove', e => { if (dragging && !calibrateMode) lineX = getCanvasX(e.clientX); });
     canvas.addEventListener('mouseup', () => { dragging = false; });
 
     // Touch events
-    canvas.addEventListener('touchstart', e => { e.preventDefault(); dragging = true; lineX = getCanvasX(e.touches[0].clientX); }, { passive: false });
-    canvas.addEventListener('touchmove', e => { e.preventDefault(); if (dragging) lineX = getCanvasX(e.touches[0].clientX); }, { passive: false });
+    canvas.addEventListener('touchstart', e => { 
+      e.preventDefault(); 
+      handleInteraction(e.touches[0].clientX); 
+    }, { passive: false });
+    canvas.addEventListener('touchmove', e => { 
+      e.preventDefault(); 
+      if (dragging && !calibrateMode) lineX = getCanvasX(e.touches[0].clientX); 
+    }, { passive: false });
     canvas.addEventListener('touchend', () => { dragging = false; });
   </script>
 </body>
