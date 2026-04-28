@@ -118,32 +118,42 @@
 
     #recordControls {
       position: absolute;
-      bottom: 30px;
+      bottom: 25px;
       left: 50%;
       transform: translateX(-50%);
       display: none;
-      gap: 0.5rem;
-      padding: 10px 15px;
-      background: rgba(15, 15, 15, 0.75);
-      backdrop-filter: blur(15px);
-      border-radius: 18px;
-      border: 1px solid rgba(255, 255, 255, 0.1);
+      gap: 0.8rem;
+      padding: 12px 20px;
+      background: rgba(15, 15, 15, 0.85);
+      backdrop-filter: blur(20px);
+      border-radius: 20px;
+      border: 1px solid rgba(255, 255, 255, 0.15);
       z-index: 100;
-      flex-wrap: wrap;
-      justify-content: center;
-      max-width: 95vw;
-      box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+      flex-wrap: nowrap;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+      justify-content: flex-start;
+      align-items: center;
+      width: auto;
+      max-width: 92vw;
+      box-shadow: 0 15px 40px rgba(0,0,0,0.6);
+      scrollbar-width: none;
+    }
+
+    #recordControls::-webkit-scrollbar {
+      display: none;
     }
 
     #recordControls button {
-      padding: 0.6rem 0.9rem;
-      font-size: 0.85rem;
+      padding: 0.7rem 1.1rem;
+      font-size: 0.9rem;
       border: none;
-      border-radius: 10px;
+      border-radius: 12px;
       cursor: pointer;
       color: #fff;
       white-space: nowrap;
-      transition: opacity 0.2s;
+      transition: all 0.2s;
+      flex-shrink: 0;
     }
 
     #recordControls button:hover {
