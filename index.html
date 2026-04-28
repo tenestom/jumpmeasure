@@ -56,6 +56,19 @@
       background: #005bb5;
     }
 
+    #cameraSelect {
+      margin-top: 1rem;
+      padding: 0.5rem 0.8rem;
+      font-size: 1rem;
+      border-radius: 6px;
+      border: none;
+      background: #222;
+      color: #fff;
+      display: none;
+      width: 100%;
+      max-width: 720px;
+    }
+
     #error {
       margin-top: 1rem;
       color: #f55;
@@ -69,22 +82,50 @@
     <video id="video" autoplay playsinline muted></video>
   </div>
   <button id="startBtn">Start Camera</button>
+  <select id="cameraSelect"></select>
   <p id="error"></p>
 
   <script>
     const video = document.getElementById('video');
     const startBtn = document.getElementById('startBtn');
     const errorEl = document.getElementById('error');
+    const cameraSelect = document.getElementById('cameraSelect');
 
-    startBtn.addEventListener('click', async () => {
-      errorEl.textContent = '';
+    async function startCamera(deviceId) {
+      const constraints = { video: deviceId ? { deviceId: { exact: deviceId } } : true, audio: false };
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+        if (video.srcObject) {
+          video.srcObject.getTracks().forEach(t => t.stop());
+        }
+        const stream = await navigator.mediaDevices.getUserMedia(constraints);
         video.srcObject = stream;
-        startBtn.style.display = 'none';
       } catch (err) {
         errorEl.textContent = 'Camera error: ' + err.message;
       }
+    }
+
+    async function populateCameras() {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const cameras = devices.filter(d => d.kind === 'videoinput');
+      cameraSelect.innerHTML = '';
+      cameras.forEach((cam, i) => {
+        const opt = document.createElement('option');
+        opt.value = cam.deviceId;
+        opt.textContent = cam.label || 'Camera ' + (i + 1);
+        cameraSelect.appendChild(opt);
+      });
+      cameraSelect.style.display = cameras.length > 1 ? 'block' : 'none';
+    }
+
+    startBtn.addEventListener('click', async () => {
+      errorEl.textContent = '';
+      await startCamera(null);
+      await populateCameras();
+      startBtn.style.display = 'none';
+    });
+
+    cameraSelect.addEventListener('change', () => {
+      startCamera(cameraSelect.value);
     });
   </script>
 </body>
