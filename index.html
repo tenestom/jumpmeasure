@@ -35,6 +35,10 @@
     }
 
     video {
+      display: none;
+    }
+
+    #canvas {
       width: 100%;
       border-radius: 8px;
       display: block;
@@ -80,6 +84,7 @@
   <h1>JumpMeasure</h1>
   <div id="videoContainer">
     <video id="video" autoplay playsinline muted></video>
+    <canvas id="canvas"></canvas>
   </div>
   <button id="startBtn">Start Camera</button>
   <select id="cameraSelect"></select>
@@ -87,9 +92,22 @@
 
   <script>
     const video = document.getElementById('video');
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
     const startBtn = document.getElementById('startBtn');
     const errorEl = document.getElementById('error');
     const cameraSelect = document.getElementById('cameraSelect');
+
+    let rafId = null;
+
+    function drawFrame() {
+      if (video.readyState >= 2) {
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        ctx.drawImage(video, 0, 0);
+      }
+      rafId = requestAnimationFrame(drawFrame);
+    }
 
     async function startCamera(deviceId) {
       const constraints = { video: deviceId ? { deviceId: { exact: deviceId } } : true, audio: false };
@@ -99,6 +117,7 @@
         }
         const stream = await navigator.mediaDevices.getUserMedia(constraints);
         video.srcObject = stream;
+        if (!rafId) drawFrame();
       } catch (err) {
         errorEl.textContent = 'Camera error: ' + err.message;
       }
