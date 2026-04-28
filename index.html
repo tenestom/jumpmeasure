@@ -189,6 +189,10 @@
         }
 
         drawLine();
+      } else if (replayMode && frames.length > 0) {
+        const frame = frames[replayIndex];
+        ctx.putImageData(frame, 0, 0);
+        drawLine();
       }
       rafId = requestAnimationFrame(drawFrame);
     }
