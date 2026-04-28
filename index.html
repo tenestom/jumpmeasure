@@ -165,7 +165,7 @@
     
     // Calibration state
     let calibrateMode = false;
-    let calibPoints = []; // [{x: fraction, meters: value}]
+    let calibPoints = []; // [{pixelX: number, meters: number}]
 
     function getCanvasX(clientX) {
       const rect = canvas.getBoundingClientRect();
@@ -209,7 +209,41 @@
         ctx.strokeStyle = 'red';
         ctx.lineWidth = 2;
         ctx.stroke();
+
+        // Measurement display
+        const meters = getInterpolatedValue(px, calibPoints);
+        if (meters !== null) {
+          ctx.fillStyle = 'white';
+          ctx.font = 'bold 20px sans-serif';
+          ctx.shadowBlur = 4;
+          ctx.shadowColor = 'black';
+          ctx.fillText(meters.toFixed(2) + ' m', px + 10, 30);
+          ctx.shadowBlur = 0;
+        }
       }
+    }
+
+    function drawCalibrationPoints() {
+      calibPoints.forEach(p => {
+        // Draw small circle
+        ctx.beginPath();
+        ctx.arc(p.pixelX, canvas.height - 30, 6, 0, Math.PI * 2);
+        ctx.fillStyle = '#2ecc71';
+        ctx.fill();
+        ctx.strokeStyle = 'white';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        // Draw meter value
+        ctx.fillStyle = 'white';
+        ctx.font = '14px sans-serif';
+        ctx.shadowBlur = 4;
+        ctx.shadowColor = 'black';
+        ctx.textAlign = 'center';
+        ctx.fillText(p.meters + ' m', p.pixelX, canvas.height - 45);
+        ctx.textAlign = 'start';
+        ctx.shadowBlur = 0;
+      });
     }
 
     function drawFrame() {
@@ -227,10 +261,12 @@
         }
 
         drawLine();
+        drawCalibrationPoints();
       } else if (replayMode && frames.length > 0) {
         const frame = frames[replayIndex];
         ctx.putImageData(frame, 0, 0);
         drawLine();
+        drawCalibrationPoints();
       }
       rafId = requestAnimationFrame(drawFrame);
     }
@@ -241,6 +277,7 @@
       canvas.height = frame.height;
       ctx.putImageData(frame, 0, 0);
       drawLine();
+      drawCalibrationPoints();
       frameInfo.textContent = `Frame ${replayIndex + 1} / ${frames.length}`;
       prevBtn.disabled = replayIndex === 0;
       nextBtn.disabled = replayIndex === frames.length - 1;
@@ -339,11 +376,11 @@
 
     function handleInteraction(clientX) {
       if (calibrateMode) {
-        let x = getCanvasX(clientX);
+        let px = getCanvasX(clientX) * canvas.width;
         let m = prompt('Enter real-world distance for this point (in meters):');
         if (m !== null && !isNaN(parseFloat(m))) {
-          calibPoints.push({ x: x, meters: parseFloat(m) });
-          calibPoints.sort((a, b) => a.x - b.x);
+          calibPoints.push({ pixelX: px, meters: parseFloat(m) });
+          calibPoints.sort((a, b) => a.pixelX - b.pixelX);
         }
       } else {
         dragging = true;
