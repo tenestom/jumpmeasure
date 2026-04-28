@@ -99,12 +99,28 @@
     const cameraSelect = document.getElementById('cameraSelect');
 
     let rafId = null;
+    let lineX = null;   // position as fraction of canvas width (0–1)
+    let dragging = false;
+
+    function getCanvasX(clientX) {
+      const rect = canvas.getBoundingClientRect();
+      return (clientX - rect.left) / rect.width;
+    }
 
     function drawFrame() {
       if (video.readyState >= 2) {
         canvas.width = video.videoWidth;
         canvas.height = video.videoHeight;
         ctx.drawImage(video, 0, 0);
+        if (lineX !== null) {
+          const px = lineX * canvas.width;
+          ctx.beginPath();
+          ctx.moveTo(px, 0);
+          ctx.lineTo(px, canvas.height);
+          ctx.strokeStyle = 'red';
+          ctx.lineWidth = 2;
+          ctx.stroke();
+        }
       }
       rafId = requestAnimationFrame(drawFrame);
     }
@@ -146,6 +162,16 @@
     cameraSelect.addEventListener('change', () => {
       startCamera(cameraSelect.value);
     });
+
+    // Mouse events
+    canvas.addEventListener('mousedown', e => { dragging = true; lineX = getCanvasX(e.clientX); });
+    canvas.addEventListener('mousemove', e => { if (dragging) lineX = getCanvasX(e.clientX); });
+    canvas.addEventListener('mouseup', () => { dragging = false; });
+
+    // Touch events
+    canvas.addEventListener('touchstart', e => { e.preventDefault(); dragging = true; lineX = getCanvasX(e.touches[0].clientX); }, { passive: false });
+    canvas.addEventListener('touchmove', e => { e.preventDefault(); if (dragging) lineX = getCanvasX(e.touches[0].clientX); }, { passive: false });
+    canvas.addEventListener('touchend', () => { dragging = false; });
   </script>
 </body>
 </html>
