@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>JumpMeasure</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      background: #111;
+      color: #fff;
+      font-family: sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+    }
+
+    h1 {
+      font-size: 1.5rem;
+      margin-bottom: 1rem;
+      letter-spacing: 0.05em;
+    }
+
+    #videoContainer {
+      position: relative;
+      width: 100%;
+      max-width: 720px;
+    }
+
+    video {
+      width: 100%;
+      border-radius: 8px;
+      display: block;
+      background: #000;
+    }
+
+    #startBtn {
+      margin-top: 1rem;
+      padding: 0.6rem 1.4rem;
+      font-size: 1rem;
+      background: #0070f3;
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+
+    #startBtn:hover {
+      background: #005bb5;
+    }
+
+    #error {
+      margin-top: 1rem;
+      color: #f55;
+      font-size: 0.9rem;
+    }
+  </style>
+</head>
+<body>
+  <h1>JumpMeasure</h1>
+  <div id="videoContainer">
+    <video id="video" autoplay playsinline muted></video>
+  </div>
+  <button id="startBtn">Start Camera</button>
+  <p id="error"></p>
+
+  <script>
+    const video = document.getElementById('video');
+    const startBtn = document.getElementById('startBtn');
+    const errorEl = document.getElementById('error');
+
+    startBtn.addEventListener('click', async () => {
+      errorEl.textContent = '';
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+        video.srcObject = stream;
+        startBtn.style.display = 'none';
+      } catch (err) {
+        errorEl.textContent = 'Camera error: ' + err.message;
+      }
+    });
+  </script>
+</body>
+</html>
