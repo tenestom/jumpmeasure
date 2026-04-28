@@ -240,6 +240,17 @@
   <p id="frameInfo"></p>
   <p id="error"></p>
 
+  <div id="calibOverlay" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.85); z-index:1000; align-items:center; justify-content:center; backdrop-filter: blur(5px);">
+    <div style="background:#1a1a1a; padding:25px; border-radius:20px; text-align:center; border: 1px solid rgba(255,255,255,0.1); box-shadow: 0 20px 50px rgba(0,0,0,0.5);">
+      <p style="margin-bottom:20px; font-weight: bold;">Real-world distance (m)</p>
+      <input type="number" id="calibInput" step="0.01" inputmode="decimal" placeholder="0.00" style="width:120px; padding:12px; border-radius:10px; border:1px solid #444; background:#000; color:#fff; font-size:1.2rem; text-align:center; margin-bottom:20px;">
+      <div style="display:flex; gap:12px; justify-content:center;">
+        <button id="calibCancel" style="padding:10px 20px; border-radius:10px; border:none; background:#333; color:#fff; cursor:pointer;">Cancel</button>
+        <button id="calibOk" style="padding:10px 20px; border-radius:10px; border:none; background:#0070f3; color:#fff; cursor:pointer; font-weight:bold;">Set Distance</button>
+      </div>
+    </div>
+  </div>
+
   <script>
     const video = document.getElementById('video');
     const canvas = document.getElementById('canvas');
@@ -257,6 +268,10 @@
     const clearCalibBtn = document.getElementById('clearCalibBtn');
     const frameInfo = document.getElementById('frameInfo');
     const measurementValue = document.getElementById('measurementValue');
+    const calibOverlay = document.getElementById('calibOverlay');
+    const calibInput = document.getElementById('calibInput');
+    const calibOk = document.getElementById('calibOk');
+    const calibCancel = document.getElementById('calibCancel');
 
     // Offscreen canvas for frame capture
     const offscreen = document.createElement('canvas');
@@ -337,22 +352,22 @@
 
     function drawCalibrationPoints() {
       calibPoints.forEach(p => {
-        // Draw small circle
+        // Draw small circle at TOP
         ctx.beginPath();
-        ctx.arc(p.pixelX, canvas.height - 30, 6, 0, Math.PI * 2);
+        ctx.arc(p.pixelX, 60, 6, 0, Math.PI * 2);
         ctx.fillStyle = '#2ecc71';
         ctx.fill();
         ctx.strokeStyle = 'white';
         ctx.lineWidth = 2;
         ctx.stroke();
 
-        // Draw meter value
+        // Draw meter value above circle
         ctx.fillStyle = 'white';
-        ctx.font = '14px sans-serif';
+        ctx.font = '12px sans-serif';
         ctx.shadowBlur = 4;
         ctx.shadowColor = 'black';
         ctx.textAlign = 'center';
-        ctx.fillText(p.meters + ' m', p.pixelX, canvas.height - 45);
+        ctx.fillText(p.meters + ' m', p.pixelX, 48);
         ctx.textAlign = 'start';
         ctx.shadowBlur = 0;
       });
@@ -489,11 +504,35 @@
     function handleInteraction(clientX) {
       if (calibrateMode) {
         let px = getCanvasX(clientX) * canvas.width;
-        let m = prompt('Enter real-world distance for this point (in meters):');
-        if (m !== null && !isNaN(parseFloat(m))) {
-          calibPoints.push({ pixelX: px, meters: parseFloat(m) });
-          calibPoints.sort((a, b) => a.pixelX - b.pixelX);
-        }
+        
+        calibOverlay.style.display = 'flex';
+        calibInput.value = '';
+        calibInput.focus();
+
+        const handleOk = () => {
+          let m = calibInput.value;
+          if (m !== '' && !isNaN(parseFloat(m))) {
+            calibPoints.push({ pixelX: px, meters: parseFloat(m) });
+            calibPoints.sort((a, b) => a.pixelX - b.pixelX);
+          }
+          cleanup();
+        };
+
+        const cleanup = () => {
+          calibOverlay.style.display = 'none';
+          calibOk.removeEventListener('click', handleOk);
+          calibCancel.removeEventListener('click', cleanup);
+          window.removeEventListener('keydown', handleKey);
+        };
+
+        const handleKey = (e) => {
+          if (e.key === 'Enter') handleOk();
+          if (e.key === 'Escape') cleanup();
+        };
+
+        calibOk.addEventListener('click', handleOk);
+        calibCancel.addEventListener('click', cleanup);
+        window.addEventListener('keydown', handleKey);
       } else {
         dragging = true;
         lineX = getCanvasX(clientX);
