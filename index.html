@@ -38,15 +38,19 @@
 
     #videoContainer {
       position: absolute;
-      top: 0;
-      left: 0;
-      width: 100%;
-      height: 100%;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      width: 100vw;
+      height: calc(100vw * 9 / 16);
+      max-height: 100vh;
+      max-width: calc(100vh * 16 / 9);
       display: flex;
       align-items: center;
       justify-content: center;
       z-index: 1;
       background: #000;
+      overflow: hidden;
     }
 
     video {
@@ -54,10 +58,8 @@
     }
 
     #canvas {
-      max-width: 100%;
-      max-height: 100%;
-      width: auto;
-      height: auto;
+      width: 100%;
+      height: 100%;
       display: block;
       object-fit: contain;
     }
@@ -107,13 +109,13 @@
       left: 50%;
       transform: translate(-50%, -50%);
       z-index: 110;
-      background: rgba(255, 0, 0, 0.2);
-      padding: 1rem;
-      border-radius: 8px;
-      backdrop-filter: blur(10px);
-      color: #fff;
+      background: none;
+      padding: 0;
+      color: #f55;
       font-size: 0.9rem;
       pointer-events: none;
+      text-align: center;
+      max-width: 80%;
     }
 
     #recordControls {
