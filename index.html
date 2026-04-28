@@ -12,37 +12,41 @@
     }
 
     body {
-      background: #111;
+      background: #000;
       color: #fff;
-      font-family: sans-serif;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      height: 100vh;
-      width: 100vw;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
       margin: 0;
-      padding: 10px;
+      padding: 0;
+      width: 100vw;
+      height: 100vh;
       overflow: hidden;
+      position: relative;
     }
 
     h1 {
-      font-size: 1.2rem;
-      margin-bottom: 0.5rem;
-      letter-spacing: 0.05em;
-      flex-shrink: 0;
+      position: absolute;
+      top: 20px;
+      left: 20px;
+      font-size: 0.9rem;
+      margin: 0;
+      text-transform: uppercase;
+      letter-spacing: 0.15em;
+      opacity: 0.6;
+      z-index: 10;
+      pointer-events: none;
     }
 
     #videoContainer {
-      position: relative;
+      position: absolute;
+      top: 0;
+      left: 0;
       width: 100%;
-      flex: 1;
+      height: 100%;
       display: flex;
       align-items: center;
       justify-content: center;
-      min-height: 0;
+      z-index: 1;
       background: #000;
-      border-radius: 8px;
-      overflow: hidden;
     }
 
     video {
@@ -59,80 +63,153 @@
     }
 
     #startBtn {
-      margin-top: 1rem;
-      padding: 0.8rem 1.6rem;
-      font-size: 1.1rem;
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      z-index: 100;
+      padding: 1rem 2rem;
+      font-size: 1.2rem;
       background: #0070f3;
       color: #fff;
       border: none;
-      border-radius: 6px;
+      border-radius: 12px;
       cursor: pointer;
-      flex-shrink: 0;
+      box-shadow: 0 4px 20px rgba(0, 112, 243, 0.4);
+      transition: transform 0.2s;
     }
 
     #startBtn:hover {
       background: #005bb5;
+      transform: translate(-50%, -50%) scale(1.05);
     }
 
     #cameraSelect {
-      margin-top: 1rem;
-      padding: 0.6rem;
-      font-size: 1rem;
+      position: absolute;
+      top: 50px;
+      left: 20px;
+      z-index: 50;
+      padding: 0.5rem;
+      font-size: 0.8rem;
       border-radius: 6px;
-      border: none;
-      background: #222;
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      background: rgba(0, 0, 0, 0.5);
+      backdrop-filter: blur(5px);
       color: #fff;
       display: none;
-      width: 100%;
-      max-width: 400px;
-      flex-shrink: 0;
+      width: auto;
+      min-width: 150px;
     }
 
     #error {
-      margin-top: 0.5rem;
-      color: #f55;
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      z-index: 110;
+      background: rgba(255, 0, 0, 0.2);
+      padding: 1rem;
+      border-radius: 8px;
+      backdrop-filter: blur(10px);
+      color: #fff;
       font-size: 0.9rem;
-      flex-shrink: 0;
+      pointer-events: none;
     }
 
     #recordControls {
+      position: absolute;
+      bottom: 30px;
+      left: 50%;
+      transform: translateX(-50%);
       display: none;
-      margin-top: 0.8rem;
-      gap: 0.4rem;
+      gap: 0.5rem;
+      padding: 10px 15px;
+      background: rgba(15, 15, 15, 0.75);
+      backdrop-filter: blur(15px);
+      border-radius: 18px;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      z-index: 100;
       flex-wrap: wrap;
       justify-content: center;
-      width: 100%;
-      flex-shrink: 0;
-      padding-bottom: env(safe-area-inset-bottom, 10px);
+      max-width: 95vw;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.5);
     }
 
     #recordControls button {
-      padding: 0.6rem 0.8rem;
-      font-size: 0.9rem;
+      padding: 0.6rem 0.9rem;
+      font-size: 0.85rem;
       border: none;
-      border-radius: 6px;
+      border-radius: 10px;
       cursor: pointer;
       color: #fff;
       white-space: nowrap;
+      transition: opacity 0.2s;
     }
 
-    #recordBtn  { background: #c0392b; }
-    #stopBtn    { background: #555; }
+    #recordControls button:hover {
+      opacity: 0.8;
+    }
+
+    #recordControls button:disabled {
+      opacity: 0.3;
+      cursor: not-allowed;
+    }
+
+    #recordBtn  { background: #c0392b; font-weight: bold; }
+    #stopBtn    { background: #444; }
     #prevBtn, #nextBtn { background: #333; }
     #liveBtn    { background: #0070f3; }
     #calibBtn   { background: #e67e22; }
     #clearCalibBtn { background: #d35400; }
 
     #frameInfo {
-      margin-top: 0.3rem;
+      position: absolute;
+      top: 20px;
+      right: 20px;
+      margin: 0;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
       font-size: 0.8rem;
-      color: #aaa;
-      flex-shrink: 0;
+      color: #fff;
+      background: rgba(0, 0, 0, 0.5);
+      padding: 5px 10px;
+      border-radius: 6px;
+      backdrop-filter: blur(5px);
+      z-index: 10;
+      pointer-events: none;
+    }
+
+    #hud-top {
+      position: absolute;
+      top: 50px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 20;
+      text-align: center;
+      pointer-events: none;
+    }
+
+    .hud-label {
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.2em;
+      opacity: 0.5;
+      margin-bottom: 4px;
+    }
+
+    #measurementValue {
+      font-size: 2rem;
+      font-weight: bold;
+      color: #fff;
+      text-shadow: 0 0 20px rgba(0,0,0,0.8);
     }
   </style>
 </head>
 <body>
   <h1>JumpMeasure</h1>
+  <div id="hud-top">
+    <div class="hud-label">Measurement</div>
+    <div id="measurementValue">--.-- m</div>
+  </div>
   <div id="videoContainer">
     <video id="video" autoplay playsinline muted></video>
     <canvas id="canvas"></canvas>
@@ -167,6 +244,7 @@
     const calibBtn = document.getElementById('calibBtn');
     const clearCalibBtn = document.getElementById('clearCalibBtn');
     const frameInfo = document.getElementById('frameInfo');
+    const measurementValue = document.getElementById('measurementValue');
 
     // Offscreen canvas for frame capture
     const offscreen = document.createElement('canvas');
@@ -232,13 +310,16 @@
         // Measurement display
         const meters = getInterpolatedValue(px, calibPoints);
         if (meters !== null) {
-          ctx.fillStyle = 'white';
-          ctx.font = 'bold 20px sans-serif';
-          ctx.shadowBlur = 4;
-          ctx.shadowColor = 'black';
-          ctx.fillText(meters.toFixed(2) + ' m', px + 10, 30);
-          ctx.shadowBlur = 0;
+          measurementValue.textContent = meters.toFixed(2) + ' m';
+          
+          ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+          ctx.font = '14px sans-serif';
+          ctx.fillText(meters.toFixed(2) + 'm', px + 10, 25);
+        } else {
+          measurementValue.textContent = '--.-- m';
         }
+      } else {
+        measurementValue.textContent = '--.-- m';
       }
     }
 
