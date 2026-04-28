@@ -102,6 +102,8 @@
     #stopBtn    { background: #555; }
     #prevBtn, #nextBtn { background: #333; }
     #liveBtn    { background: #0070f3; }
+    #calibBtn   { background: #e67e22; }
+    #clearCalibBtn { background: #d35400; }
 
     #frameInfo {
       margin-top: 0.4rem;
@@ -124,6 +126,8 @@
     <button id="prevBtn" disabled>◀ Prev</button>
     <button id="nextBtn" disabled>Next ▶</button>
     <button id="liveBtn" disabled>▶ Live</button>
+    <button id="calibBtn">🎯 Calibrate</button>
+    <button id="clearCalibBtn">Clear Calib</button>
   </div>
   <p id="frameInfo"></p>
   <p id="error"></p>
@@ -141,6 +145,8 @@
     const prevBtn = document.getElementById('prevBtn');
     const nextBtn = document.getElementById('nextBtn');
     const liveBtn = document.getElementById('liveBtn');
+    const calibBtn = document.getElementById('calibBtn');
+    const clearCalibBtn = document.getElementById('clearCalibBtn');
     const frameInfo = document.getElementById('frameInfo');
 
     // Offscreen canvas for frame capture
@@ -156,6 +162,10 @@
     let frames = [];       // array of ImageData
     let replayMode = false;
     let replayIndex = 0;
+    
+    // Calibration state
+    let calibrateMode = false;
+    let calibPoints = []; // [{x: fraction, meters: value}]
 
     function getCanvasX(clientX) {
       const rect = canvas.getBoundingClientRect();
