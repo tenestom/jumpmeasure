@@ -382,6 +382,11 @@
       return (clientX - rect.left) / rect.width;
     }
 
+    function getCanvasY(clientY) {
+      const rect = canvas.getBoundingClientRect();
+      return (clientY - rect.top) / rect.height;
+    }
+
     function getInterpolatedValue(pixelX, points) {
       if (!points || points.length === 0) return null;
 
@@ -423,11 +428,21 @@
         // Measurement display
         const meters = getInterpolatedValue(px, calibPoints);
         if (meters !== null) {
-          measurementValue.textContent = meters.toFixed(2) + ' m';
+          let finalMeters = meters;
+          
+          // Apply perspective correction if we have calibration Y data
+          if (calibPoints.length > 0 && calibPoints[0].pixelY !== undefined) {
+            const y_ref = calibPoints.reduce((acc, p) => acc + (p.pixelY || 0), 0) / calibPoints.length;
+            const currentY = canvas.height * 0.9; // Approximate water surface intersection
+            const scale = y_ref / currentY;
+            finalMeters = meters * scale;
+          }
+
+          measurementValue.textContent = finalMeters.toFixed(2) + ' m';
           
           ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
           ctx.font = '14px sans-serif';
-          ctx.fillText(meters.toFixed(2) + 'm', px + 10, 25);
+          ctx.fillText(finalMeters.toFixed(2) + 'm', px + 10, 25);
         } else {
           measurementValue.textContent = '--.-- m';
         }
@@ -587,9 +602,10 @@
       calibPoints = [];
     });
 
-    function handleInteraction(clientX) {
+    function handleInteraction(clientX, clientY) {
       if (calibrateMode) {
         let px = getCanvasX(clientX) * canvas.width;
+        let py = getCanvasY(clientY) * canvas.height;
         
         calibOverlay.style.display = 'flex';
         calibInput.value = '';
@@ -598,7 +614,7 @@
         const handleOk = () => {
           let m = calibInput.value;
           if (m !== '' && !isNaN(parseFloat(m))) {
-            calibPoints.push({ pixelX: px, meters: parseFloat(m) });
+            calibPoints.push({ pixelX: px, pixelY: py, meters: parseFloat(m) });
             calibPoints.sort((a, b) => a.pixelX - b.pixelX);
           }
           cleanup();
@@ -626,14 +642,14 @@
     }
 
     // Mouse events
-    canvas.addEventListener('mousedown', e => { handleInteraction(e.clientX); });
+    canvas.addEventListener('mousedown', e => { handleInteraction(e.clientX, e.clientY); });
     canvas.addEventListener('mousemove', e => { if (dragging && !calibrateMode) lineX = getCanvasX(e.clientX); });
     canvas.addEventListener('mouseup', () => { dragging = false; });
 
     // Touch events
     canvas.addEventListener('touchstart', e => { 
       e.preventDefault(); 
-      handleInteraction(e.touches[0].clientX); 
+      handleInteraction(e.touches[0].clientX, e.touches[0].clientY); 
     }, { passive: false });
     canvas.addEventListener('touchmove', e => { 
       e.preventDefault(); 
