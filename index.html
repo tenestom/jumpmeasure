@@ -375,24 +375,35 @@
     let replayMode = false;
     let replayIndex = 0;
     
-    // Calibration state
-    let calibrateMode = false;
     let calibPoints = []; // [{pixelX: number, meters: number}]
+
+    function resizeCanvas() {
+      const rect = canvas.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      canvas.width = rect.width * dpr;
+      canvas.height = rect.height * dpr;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+
+    window.addEventListener('resize', resizeCanvas);
+    window.addEventListener('load', resizeCanvas);
 
     function getCanvasCoords(clientX, clientY) {
       const rect = canvas.getBoundingClientRect();
       return {
-        x: (clientX - rect.left) * (canvas.width / rect.width),
-        y: (clientY - rect.top) * (canvas.height / rect.height)
+        x: clientX - rect.left,
+        y: clientY - rect.top
       };
     }
 
     function getCanvasX(clientX) {
-      return getCanvasCoords(clientX, 0).x / canvas.width;
+      const rect = canvas.getBoundingClientRect();
+      return getCanvasCoords(clientX, 0).x / rect.width;
     }
 
     function getCanvasY(clientY) {
-      return getCanvasCoords(0, clientY).y / canvas.height;
+      const rect = canvas.getBoundingClientRect();
+      return getCanvasCoords(0, clientY).y / rect.height;
     }
 
     function getInterpolatedValue(pixelX, points) {
@@ -424,8 +435,12 @@
     }
 
     function drawLine() {
+      const rect = canvas.getBoundingClientRect();
+      const cssW = rect.width;
+      const cssH = rect.height;
+
       // Calculate y_ref from calibration points
-      let y_ref = canvas.height * 0.8;
+      let y_ref = cssH * 0.8;
       if (calibPoints.length > 0 && calibPoints[0].pixelY !== undefined) {
         y_ref = calibPoints.reduce((acc, p) => acc + (p.pixelY || 0), 0) / calibPoints.length;
       }
@@ -437,10 +452,10 @@
 
       // Draw Vertical Line (X-axis)
       if (lineX !== null) {
-        const px = lineX * canvas.width;
+        const px = lineX * cssW;
         ctx.beginPath();
         ctx.moveTo(px, 0);
-        ctx.lineTo(px, canvas.height);
+        ctx.lineTo(px, cssH);
         ctx.strokeStyle = 'red';
         ctx.lineWidth = 2;
         ctx.stroke();
@@ -449,7 +464,7 @@
         if (lineY !== null) {
           ctx.beginPath();
           ctx.moveTo(0, lineY);
-          ctx.lineTo(canvas.width, lineY);
+          ctx.lineTo(cssW, lineY);
           ctx.strokeStyle = '#3498db';
           ctx.lineWidth = 2;
           ctx.stroke();
@@ -505,15 +520,15 @@
     }
 
     function drawFrame() {
+      const rect = canvas.getBoundingClientRect();
       if (!replayMode && video.readyState >= 2) {
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
-        ctx.drawImage(video, 0, 0);
+        ctx.clearRect(0, 0, rect.width, rect.height);
+        ctx.drawImage(video, 0, 0, video.videoWidth, video.videoHeight, 0, 0, rect.width, rect.height);
 
         // Capture frame during recording
         if (recording) {
-          offscreen.width = canvas.width;
-          offscreen.height = canvas.height;
+          offscreen.width = video.videoWidth;
+          offscreen.height = video.videoHeight;
           offCtx.drawImage(video, 0, 0);
           frames.push(offCtx.getImageData(0, 0, offscreen.width, offscreen.height));
         }
@@ -522,7 +537,14 @@
         drawCalibrationPoints();
       } else if (replayMode && frames.length > 0) {
         const frame = frames[replayIndex];
-        ctx.putImageData(frame, 0, 0);
+        ctx.clearRect(0, 0, rect.width, rect.height);
+        // Put image data to offscreen first if needed, but easier to draw original frame source if possible.
+        // Since we only have ImageData, we must put it. 
+        // To resize ImageData, we draw it to offscreen then draw offscreen to main.
+        offscreen.width = frame.width;
+        offscreen.height = frame.height;
+        offCtx.putImageData(frame, 0, 0);
+        ctx.drawImage(offscreen, 0, 0, frame.width, frame.height, 0, 0, rect.width, rect.height);
         drawLine();
         drawCalibrationPoints();
       }
@@ -530,10 +552,13 @@
     }
 
     function showReplayFrame() {
+      const rect = canvas.getBoundingClientRect();
       const frame = frames[replayIndex];
-      canvas.width = frame.width;
-      canvas.height = frame.height;
-      ctx.putImageData(frame, 0, 0);
+      offscreen.width = frame.width;
+      offscreen.height = frame.height;
+      offCtx.putImageData(frame, 0, 0);
+      ctx.clearRect(0, 0, rect.width, rect.height);
+      ctx.drawImage(offscreen, 0, 0, frame.width, frame.height, 0, 0, rect.width, rect.height);
       drawLine();
       drawCalibrationPoints();
       frameInfo.textContent = `Frame ${replayIndex + 1} / ${frames.length}`;
@@ -679,7 +704,7 @@
           draggingY = true;
         } else {
           draggingX = true;
-          lineX = cx / canvas.width;
+          lineX = cx / canvas.getBoundingClientRect().width;
         }
       }
     }
@@ -690,7 +715,7 @@
       if (draggingX && !calibrateMode) {
         lineX = getCanvasX(e.clientX);
       } else if (draggingY && !calibrateMode) {
-        lineY = getCanvasY(e.clientY) * canvas.height;
+        lineY = getCanvasCoords(0, e.clientY).y;
       }
     });
     canvas.addEventListener('mouseup', () => { draggingX = false; draggingY = false; });
@@ -705,7 +730,7 @@
       if (draggingX && !calibrateMode) {
         lineX = getCanvasX(e.touches[0].clientX); 
       } else if (draggingY && !calibrateMode) {
-        lineY = getCanvasY(e.touches[0].clientY) * canvas.height;
+        lineY = getCanvasCoords(0, e.touches[0].clientY).y;
       }
     }, { passive: false });
     canvas.addEventListener('touchend', () => { draggingX = false; draggingY = false; });
