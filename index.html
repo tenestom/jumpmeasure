@@ -365,7 +365,9 @@
 
     let rafId = null;
     let lineX = null;
-    let dragging = false;
+    let lineY = null;
+    let draggingX = false;
+    let draggingY = false;
 
     // Recording state
     let recording = false;
@@ -416,6 +418,18 @@
     }
 
     function drawLine() {
+      // Calculate y_ref from calibration points
+      let y_ref = canvas.height * 0.8;
+      if (calibPoints.length > 0 && calibPoints[0].pixelY !== undefined) {
+        y_ref = calibPoints.reduce((acc, p) => acc + (p.pixelY || 0), 0) / calibPoints.length;
+      }
+
+      // Default lineY to y_ref if not set
+      if (lineY === null && calibPoints.length > 0) {
+        lineY = y_ref;
+      }
+
+      // Draw Vertical Line (X-axis)
       if (lineX !== null) {
         const px = lineX * canvas.width;
         ctx.beginPath();
@@ -425,16 +439,26 @@
         ctx.lineWidth = 2;
         ctx.stroke();
 
+        // Draw Horizontal Line (Y-axis perspective)
+        if (lineY !== null) {
+          ctx.beginPath();
+          ctx.moveTo(0, lineY);
+          ctx.lineTo(canvas.width, lineY);
+          ctx.strokeStyle = '#3498db';
+          ctx.lineWidth = 2;
+          ctx.stroke();
+        }
+
         // Measurement display
         const meters = getInterpolatedValue(px, calibPoints);
         if (meters !== null) {
           let finalMeters = meters;
           
-          // Apply perspective correction if we have calibration Y data
-          if (calibPoints.length > 0 && calibPoints[0].pixelY !== undefined) {
-            const y_ref = calibPoints.reduce((acc, p) => acc + (p.pixelY || 0), 0) / calibPoints.length;
-            const currentY = canvas.height * 0.9; // Approximate water surface intersection
-            const scale = y_ref / currentY;
+          // Apply perspective correction
+          if (lineY !== null) {
+            let scale = y_ref / lineY;
+            // Clamp scale to reasonable bounds
+            scale = Math.max(0.9, Math.min(1.1, scale));
             finalMeters = meters * scale;
           }
 
@@ -603,10 +627,10 @@
     });
 
     function handleInteraction(clientX, clientY) {
+      const cx = getCanvasX(clientX) * canvas.width;
+      const cy = getCanvasY(clientY) * canvas.height;
+
       if (calibrateMode) {
-        let px = getCanvasX(clientX) * canvas.width;
-        let py = getCanvasY(clientY) * canvas.height;
-        
         calibOverlay.style.display = 'flex';
         calibInput.value = '';
         calibInput.focus();
@@ -614,7 +638,7 @@
         const handleOk = () => {
           let m = calibInput.value;
           if (m !== '' && !isNaN(parseFloat(m))) {
-            calibPoints.push({ pixelX: px, pixelY: py, meters: parseFloat(m) });
+            calibPoints.push({ pixelX: cx, pixelY: cy, meters: parseFloat(m) });
             calibPoints.sort((a, b) => a.pixelX - b.pixelX);
           }
           cleanup();
@@ -636,15 +660,26 @@
         calibCancel.addEventListener('click', cleanup);
         window.addEventListener('keydown', handleKey);
       } else {
-        dragging = true;
-        lineX = getCanvasX(clientX);
+        // Hit detection for horizontal line
+        if (lineY !== null && Math.abs(cy - lineY) < 20) {
+          draggingY = true;
+        } else {
+          draggingX = true;
+          lineX = cx / canvas.width;
+        }
       }
     }
 
     // Mouse events
     canvas.addEventListener('mousedown', e => { handleInteraction(e.clientX, e.clientY); });
-    canvas.addEventListener('mousemove', e => { if (dragging && !calibrateMode) lineX = getCanvasX(e.clientX); });
-    canvas.addEventListener('mouseup', () => { dragging = false; });
+    canvas.addEventListener('mousemove', e => { 
+      if (draggingX && !calibrateMode) {
+        lineX = getCanvasX(e.clientX);
+      } else if (draggingY && !calibrateMode) {
+        lineY = getCanvasY(e.clientY) * canvas.height;
+      }
+    });
+    canvas.addEventListener('mouseup', () => { draggingX = false; draggingY = false; });
 
     // Touch events
     canvas.addEventListener('touchstart', e => { 
@@ -653,9 +688,13 @@
     }, { passive: false });
     canvas.addEventListener('touchmove', e => { 
       e.preventDefault(); 
-      if (dragging && !calibrateMode) lineX = getCanvasX(e.touches[0].clientX); 
+      if (draggingX && !calibrateMode) {
+        lineX = getCanvasX(e.touches[0].clientX); 
+      } else if (draggingY && !calibrateMode) {
+        lineY = getCanvasY(e.touches[0].clientY) * canvas.height;
+      }
     }, { passive: false });
-    canvas.addEventListener('touchend', () => { dragging = false; });
+    canvas.addEventListener('touchend', () => { draggingX = false; draggingY = false; });
   </script>
 </body>
 </html>
