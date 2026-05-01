@@ -316,7 +316,7 @@
     <p id="error"></p>
   </div>
 
-  <div id="calibOverlay" style="display:none; position:fixed; z-index:1000; pointer-events:auto;">
+  <div id="calibOverlay" style="display:none; position:fixed; z-index:9999; pointer-events:auto;">
     <div style="background:#1a1a1a; padding:15px; border-radius:15px; text-align:center; border: 1px solid rgba(255,255,255,0.2); box-shadow: 0 10px 30px rgba(0,0,0,0.5); min-width: 160px;">
       <p style="margin-bottom:10px; font-size: 0.8rem; font-weight: bold; opacity: 0.8;">Distance (m)</p>
       <input type="number" id="calibInput" step="0.01" inputmode="decimal" placeholder="0.00" style="width:100%; padding:10px; border-radius:8px; border:1px solid #444; background:#000; color:#fff; font-size:1.1rem; text-align:center; margin-bottom:12px;">
@@ -623,13 +623,23 @@
     }
 
     async function startCamera(deviceId) {
-      const constraints = { video: deviceId ? { deviceId: { exact: deviceId } } : true, audio: false };
+      const constraints = { 
+        video: deviceId ? { deviceId: { exact: deviceId } } : true, 
+        audio: false 
+      };
       try {
         if (video.srcObject) {
           video.srcObject.getTracks().forEach(t => t.stop());
         }
         const stream = await navigator.mediaDevices.getUserMedia(constraints);
         video.srcObject = stream;
+        
+        await new Promise(resolve => {
+          video.onloadedmetadata = () => resolve();
+        });
+        
+        await video.play();
+
         if (!rafId) drawFrame();
       } catch (err) {
         errorEl.textContent = 'Camera error: ' + err.message;
@@ -728,7 +738,7 @@
         setTimeout(() => {
           calibInput.focus();
           calibInput.select();
-        }, 10);
+        }, 0);
 
         const handleOk = () => {
           let m = calibInput.value;
@@ -778,7 +788,6 @@
 
     // Touch events
     canvas.addEventListener('touchstart', e => { 
-      e.preventDefault(); 
       handleInteraction(e.touches[0].clientX, e.touches[0].clientY); 
     }, { passive: false });
     canvas.addEventListener('touchmove', e => { 
