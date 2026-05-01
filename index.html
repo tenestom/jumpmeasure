@@ -522,13 +522,37 @@
     function drawFrame() {
       const rect = canvas.getBoundingClientRect();
       if (!replayMode && video.readyState >= 2) {
+        const vw = video.videoWidth;
+        const vh = video.videoHeight;
+        if (!vw || !vh) {
+          rafId = requestAnimationFrame(drawFrame);
+          return;
+        }
+
         ctx.clearRect(0, 0, rect.width, rect.height);
-        ctx.drawImage(video, 0, 0, video.videoWidth, video.videoHeight, 0, 0, rect.width, rect.height);
+        
+        // Fit video without distortion
+        const videoAspect = vw / vh;
+        const canvasAspect = rect.width / rect.height;
+        let drawW, drawH, offsetX, offsetY;
+
+        if (videoAspect > canvasAspect) {
+          drawW = rect.width;
+          drawH = rect.width / videoAspect;
+          offsetX = 0;
+          offsetY = (rect.height - drawH) / 2;
+        } else {
+          drawH = rect.height;
+          drawW = rect.height * videoAspect;
+          offsetX = (rect.width - drawW) / 2;
+          offsetY = 0;
+        }
+        ctx.drawImage(video, 0, 0, vw, vh, offsetX, offsetY, drawW, drawH);
 
         // Capture frame during recording
         if (recording) {
-          offscreen.width = video.videoWidth;
-          offscreen.height = video.videoHeight;
+          offscreen.width = vw;
+          offscreen.height = vh;
           offCtx.drawImage(video, 0, 0);
           frames.push(offCtx.getImageData(0, 0, offscreen.width, offscreen.height));
         }
@@ -538,13 +562,28 @@
       } else if (replayMode && frames.length > 0) {
         const frame = frames[replayIndex];
         ctx.clearRect(0, 0, rect.width, rect.height);
-        // Put image data to offscreen first if needed, but easier to draw original frame source if possible.
-        // Since we only have ImageData, we must put it. 
-        // To resize ImageData, we draw it to offscreen then draw offscreen to main.
+        
         offscreen.width = frame.width;
         offscreen.height = frame.height;
         offCtx.putImageData(frame, 0, 0);
-        ctx.drawImage(offscreen, 0, 0, frame.width, frame.height, 0, 0, rect.width, rect.height);
+
+        const videoAspect = frame.width / frame.height;
+        const canvasAspect = rect.width / rect.height;
+        let drawW, drawH, offsetX, offsetY;
+
+        if (videoAspect > canvasAspect) {
+          drawW = rect.width;
+          drawH = rect.width / videoAspect;
+          offsetX = 0;
+          offsetY = (rect.height - drawH) / 2;
+        } else {
+          drawH = rect.height;
+          drawW = rect.height * videoAspect;
+          offsetX = (rect.width - drawW) / 2;
+          offsetY = 0;
+        }
+        ctx.drawImage(offscreen, 0, 0, frame.width, frame.height, offsetX, offsetY, drawW, drawH);
+        
         drawLine();
         drawCalibrationPoints();
       }
@@ -558,7 +597,24 @@
       offscreen.height = frame.height;
       offCtx.putImageData(frame, 0, 0);
       ctx.clearRect(0, 0, rect.width, rect.height);
-      ctx.drawImage(offscreen, 0, 0, frame.width, frame.height, 0, 0, rect.width, rect.height);
+
+      const videoAspect = frame.width / frame.height;
+      const canvasAspect = rect.width / rect.height;
+      let drawW, drawH, offsetX, offsetY;
+
+      if (videoAspect > canvasAspect) {
+        drawW = rect.width;
+        drawH = rect.width / videoAspect;
+        offsetX = 0;
+        offsetY = (rect.height - drawH) / 2;
+      } else {
+        drawH = rect.height;
+        drawW = rect.height * videoAspect;
+        offsetX = (rect.width - drawW) / 2;
+        offsetY = 0;
+      }
+      ctx.drawImage(offscreen, 0, 0, frame.width, frame.height, offsetX, offsetY, drawW, drawH);
+
       drawLine();
       drawCalibrationPoints();
       frameInfo.textContent = `Frame ${replayIndex + 1} / ${frames.length}`;
