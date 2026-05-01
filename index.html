@@ -388,22 +388,49 @@
     window.addEventListener('resize', resizeCanvas);
     window.addEventListener('load', resizeCanvas);
 
-    function getCanvasCoords(clientX, clientY) {
+    function getCanvasPoint(clientX, clientY) {
       const rect = canvas.getBoundingClientRect();
+      const vw = video.videoWidth || (replayMode && frames.length > 0 ? frames[replayIndex].width : 0);
+      const vh = video.videoHeight || (replayMode && frames.length > 0 ? frames[replayIndex].height : 0);
+      
+      if (!vw || !vh) {
+        return { x: clientX - rect.left, y: clientY - rect.top, vw: rect.width, vh: rect.height, ox: 0, oy: 0 };
+      }
+
+      const videoAspect = vw / vh;
+      const canvasAspect = rect.width / rect.height;
+
+      let drawW, drawH, offsetX, offsetY;
+      if (videoAspect > canvasAspect) {
+        drawW = rect.width;
+        drawH = rect.width / videoAspect;
+        offsetX = 0;
+        offsetY = (rect.height - drawH) / 2;
+      } else {
+        drawH = rect.height;
+        drawW = rect.height * videoAspect;
+        offsetX = (rect.width - drawW) / 2;
+        offsetY = 0;
+      }
+
       return {
-        x: clientX - rect.left,
-        y: clientY - rect.top
+        x: clientX - rect.left - offsetX,
+        y: clientY - rect.top - offsetY,
+        vw: drawW,
+        vh: drawH,
+        ox: offsetX,
+        oy: offsetY
       };
     }
 
     function getCanvasX(clientX) {
-      const rect = canvas.getBoundingClientRect();
-      return getCanvasCoords(clientX, 0).x / rect.width;
+      const pt = getCanvasPoint(clientX, 0);
+      return pt.x / pt.vw;
     }
 
     function getCanvasY(clientY) {
-      const rect = canvas.getBoundingClientRect();
-      return getCanvasCoords(0, clientY).y / rect.height;
+      const pt = getCanvasPoint(0, clientY);
+      return pt.y / pt.vh;
     }
 
     function getInterpolatedValue(pixelX, points) {
@@ -435,12 +462,14 @@
     }
 
     function drawLine() {
-      const rect = canvas.getBoundingClientRect();
-      const cssW = rect.width;
-      const cssH = rect.height;
+      const pt = getCanvasPoint(0, 0); // Get layout info
+      const ox = pt.ox;
+      const oy = pt.oy;
+      const vw = pt.vw;
+      const vh = pt.vh;
 
-      // Calculate y_ref from calibration points
-      let y_ref = cssH * 0.8;
+      // Calculate y_ref from calibration points (relative to video area)
+      let y_ref = vh * 0.8;
       if (calibPoints.length > 0 && calibPoints[0].pixelY !== undefined) {
         y_ref = calibPoints.reduce((acc, p) => acc + (p.pixelY || 0), 0) / calibPoints.length;
       }
@@ -452,19 +481,20 @@
 
       // Draw Vertical Line (X-axis)
       if (lineX !== null) {
-        const px = lineX * cssW;
+        const px = ox + lineX * vw;
         ctx.beginPath();
-        ctx.moveTo(px, 0);
-        ctx.lineTo(px, cssH);
+        ctx.moveTo(px, oy);
+        ctx.lineTo(px, oy + vh);
         ctx.strokeStyle = 'red';
         ctx.lineWidth = 2;
         ctx.stroke();
 
         // Draw Horizontal Line (Y-axis perspective)
         if (lineY !== null) {
+          const py = oy + lineY;
           ctx.beginPath();
-          ctx.moveTo(0, lineY);
-          ctx.lineTo(cssW, lineY);
+          ctx.moveTo(ox, py);
+          ctx.lineTo(ox + vw, py);
           ctx.strokeStyle = '#3498db';
           ctx.lineWidth = 2;
           ctx.stroke();
@@ -497,10 +527,17 @@
     }
 
     function drawCalibrationPoints() {
+      const pt = getCanvasPoint(0, 0);
+      const ox = pt.ox;
+      const oy = pt.oy;
+
       calibPoints.forEach(p => {
+        const px = ox + p.pixelX;
+        const py = oy + p.pixelY;
+        
         // Draw small circle at actual position
         ctx.beginPath();
-        ctx.arc(p.pixelX, p.pixelY, 6, 0, Math.PI * 2);
+        ctx.arc(px, py, 6, 0, Math.PI * 2);
         ctx.fillStyle = '#2ecc71';
         ctx.fill();
         ctx.strokeStyle = 'white';
@@ -513,7 +550,7 @@
         ctx.shadowBlur = 4;
         ctx.shadowColor = 'black';
         ctx.textAlign = 'center';
-        ctx.fillText(p.meters + ' m', p.pixelX, p.pixelY - 10);
+        ctx.fillText(p.meters + ' m', px, py - 10);
         ctx.textAlign = 'start';
         ctx.shadowBlur = 0;
       });
@@ -724,9 +761,9 @@
     });
 
     function handleInteraction(clientX, clientY) {
-      const coords = getCanvasCoords(clientX, clientY);
-      const cx = coords.x;
-      const cy = coords.y;
+      const pt = getCanvasPoint(clientX, clientY);
+      const cx = pt.x;
+      const cy = pt.y;
 
       if (calibrateMode) {
         // Position overlay near click
@@ -770,7 +807,7 @@
           draggingY = true;
         } else {
           draggingX = true;
-          lineX = cx / canvas.getBoundingClientRect().width;
+          lineX = cx / pt.vw;
         }
       }
     }
@@ -781,7 +818,7 @@
       if (draggingX && !calibrateMode) {
         lineX = getCanvasX(e.clientX);
       } else if (draggingY && !calibrateMode) {
-        lineY = getCanvasCoords(0, e.clientY).y;
+        lineY = getCanvasPoint(0, e.clientY).y;
       }
     });
     canvas.addEventListener('mouseup', () => { draggingX = false; draggingY = false; });
@@ -795,7 +832,7 @@
       if (draggingX && !calibrateMode) {
         lineX = getCanvasX(e.touches[0].clientX); 
       } else if (draggingY && !calibrateMode) {
-        lineY = getCanvasCoords(0, e.touches[0].clientY).y;
+        lineY = getCanvasPoint(0, e.touches[0].clientY).y;
       }
     }, { passive: false });
     canvas.addEventListener('touchend', () => { draggingX = false; draggingY = false; });
