@@ -19,14 +19,15 @@
       padding: 0;
       width: 100vw;
       height: 100vh;
+      height: 100dvh;
       overflow: hidden;
       position: relative;
     }
 
     h1 {
       position: absolute;
-      top: 20px;
-      left: 20px;
+      top: calc(20px + env(safe-area-inset-top, 0px));
+      left: calc(20px + env(safe-area-inset-left, 0px));
       font-size: 0.9rem;
       margin: 0;
       text-transform: uppercase;
@@ -120,7 +121,7 @@
 
     #recordControls {
       position: absolute;
-      bottom: 25px;
+      bottom: calc(25px + env(safe-area-inset-bottom, 0px));
       left: 50%;
       transform: translateX(-50%);
       display: none;
@@ -176,8 +177,8 @@
 
     #frameInfo {
       position: absolute;
-      top: 20px;
-      right: 20px;
+      top: calc(20px + env(safe-area-inset-top, 0px));
+      right: calc(20px + env(safe-area-inset-right, 0px));
       margin: 0;
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
       font-size: 0.8rem;
@@ -192,7 +193,7 @@
 
     #hud-top {
       position: absolute;
-      top: 50px;
+      top: calc(50px + env(safe-area-inset-top, 0px));
       left: 50%;
       transform: translateX(-50%);
       z-index: 20;
@@ -221,6 +222,7 @@
       left: 0;
       width: 100vw;
       height: 100vh;
+      height: 100dvh;
       background: #fff;
       display: flex;
       align-items: center;
