@@ -316,13 +316,13 @@
     <p id="error"></p>
   </div>
 
-  <div id="calibOverlay" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.85); z-index:1000; align-items:center; justify-content:center; backdrop-filter: blur(5px);">
-    <div style="background:#1a1a1a; padding:25px; border-radius:20px; text-align:center; border: 1px solid rgba(255,255,255,0.1); box-shadow: 0 20px 50px rgba(0,0,0,0.5);">
-      <p style="margin-bottom:20px; font-weight: bold;">Real-world distance (m)</p>
-      <input type="number" id="calibInput" step="0.01" inputmode="decimal" placeholder="0.00" style="width:120px; padding:12px; border-radius:10px; border:1px solid #444; background:#000; color:#fff; font-size:1.2rem; text-align:center; margin-bottom:20px;">
-      <div style="display:flex; gap:12px; justify-content:center;">
-        <button id="calibCancel" style="padding:10px 20px; border-radius:10px; border:none; background:#333; color:#fff; cursor:pointer;">Cancel</button>
-        <button id="calibOk" style="padding:10px 20px; border-radius:10px; border:none; background:#0070f3; color:#fff; cursor:pointer; font-weight:bold;">Set Distance</button>
+  <div id="calibOverlay" style="display:none; position:fixed; z-index:9999; pointer-events:auto;">
+    <div style="background:#1a1a1a; padding:15px; border-radius:15px; text-align:center; border: 1px solid rgba(255,255,255,0.2); box-shadow: 0 10px 30px rgba(0,0,0,0.5); min-width: 160px;">
+      <p style="margin-bottom:10px; font-size: 0.8rem; font-weight: bold; opacity: 0.8;">Distance (m)</p>
+      <input type="number" id="calibInput" step="0.01" inputmode="decimal" placeholder="0.00" style="width:100%; padding:10px; border-radius:8px; border:1px solid #444; background:#000; color:#fff; font-size:1.1rem; text-align:center; margin-bottom:12px;">
+      <div style="display:flex; gap:8px; justify-content:center;">
+        <button id="calibCancel" style="padding:8px 12px; font-size: 0.8rem; border-radius:8px; border:none; background:#333; color:#fff; cursor:pointer;">Esc</button>
+        <button id="calibOk" style="padding:8px 12px; font-size: 0.8rem; border-radius:8px; border:none; background:#0070f3; color:#fff; cursor:pointer; font-weight:bold;">OK</button>
       </div>
     </div>
   </div>
@@ -357,6 +357,8 @@
     homeStartBtn.addEventListener('click', () => {
       homeScreen.style.display = 'none';
       appScreen.style.display = 'block';
+      // Ensure canvas is correctly sized on first show
+      resizeCanvas();
     });
 
     // Offscreen canvas for frame capture
@@ -365,7 +367,9 @@
 
     let rafId = null;
     let lineX = null;
-    let dragging = false;
+    let lineY = null;
+    let draggingX = false;
+    let draggingY = false;
 
     // Recording state
     let recording = false;
@@ -375,9 +379,8 @@
     
     // Calibration state
     let calibrateMode = false;
-    let calibPoints = []; // [{pixelX: number, meters: number}]
+    let calibPoints = []; // [{pixelX: number, pixelY: number, meters: number}]
 
-<<<<<<< HEAD
     function resizeCanvas() {
       const rect = canvas.getBoundingClientRect();
       const dpr = window.devicePixelRatio || 1;
@@ -432,11 +435,6 @@
     function getCanvasY(clientY) {
       const pt = getCanvasPoint(0, clientY);
       return pt.y / pt.vh;
-=======
-    function getCanvasX(clientX) {
-      const rect = canvas.getBoundingClientRect();
-      return (clientX - rect.left) / rect.width;
->>>>>>> 7865bc78886a9083cf3d14685d294bcb006dba21
     }
 
     function getInterpolatedValue(pixelX, points) {
@@ -468,7 +466,6 @@
     }
 
     function drawLine() {
-<<<<<<< HEAD
       const pt = getCanvasPoint(0, 0); // Get layout info
       const ox = pt.ox;
       const oy = pt.oy;
@@ -492,18 +489,10 @@
         ctx.beginPath();
         ctx.moveTo(px, oy);
         ctx.lineTo(px, oy + vh);
-=======
-      if (lineX !== null) {
-        const px = lineX * canvas.width;
-        ctx.beginPath();
-        ctx.moveTo(px, 0);
-        ctx.lineTo(px, canvas.height);
->>>>>>> 7865bc78886a9083cf3d14685d294bcb006dba21
         ctx.strokeStyle = 'red';
         ctx.lineWidth = 2;
         ctx.stroke();
 
-<<<<<<< HEAD
         // Draw Horizontal Line (Y-axis perspective)
         if (lineY !== null) {
           const py = oy + lineY;
@@ -515,16 +504,24 @@
           ctx.stroke();
         }
 
-=======
->>>>>>> 7865bc78886a9083cf3d14685d294bcb006dba21
         // Measurement display
-        const meters = getInterpolatedValue(px, calibPoints);
+        const meters = getInterpolatedValue(lineX * vw, calibPoints);
         if (meters !== null) {
-          measurementValue.textContent = meters.toFixed(2) + ' m';
+          let finalMeters = meters;
+          
+          // Apply perspective correction
+          if (lineY !== null) {
+            let scale = y_ref / lineY;
+            // Clamp scale to reasonable bounds
+            scale = Math.max(0.9, Math.min(1.1, scale));
+            finalMeters = meters * scale;
+          }
+
+          measurementValue.textContent = finalMeters.toFixed(2) + ' m';
           
           ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
           ctx.font = '14px sans-serif';
-          ctx.fillText(meters.toFixed(2) + 'm', px + 10, 25);
+          ctx.fillText(finalMeters.toFixed(2) + 'm', px + 10, oy + 25);
         } else {
           measurementValue.textContent = '--.-- m';
         }
@@ -539,18 +536,12 @@
       const oy = pt.oy;
 
       calibPoints.forEach(p => {
-<<<<<<< HEAD
         const px = ox + p.pixelX;
         const py = oy + p.pixelY;
         
         // Draw small circle at actual position
         ctx.beginPath();
         ctx.arc(px, py, 6, 0, Math.PI * 2);
-=======
-        // Draw small circle at TOP
-        ctx.beginPath();
-        ctx.arc(p.pixelX, 60, 6, 0, Math.PI * 2);
->>>>>>> 7865bc78886a9083cf3d14685d294bcb006dba21
         ctx.fillStyle = '#2ecc71';
         ctx.fill();
         ctx.strokeStyle = 'white';
@@ -563,26 +554,46 @@
         ctx.shadowBlur = 4;
         ctx.shadowColor = 'black';
         ctx.textAlign = 'center';
-<<<<<<< HEAD
         ctx.fillText(p.meters + ' m', px, py - 10);
-=======
-        ctx.fillText(p.meters + ' m', p.pixelX, 48);
->>>>>>> 7865bc78886a9083cf3d14685d294bcb006dba21
         ctx.textAlign = 'start';
         ctx.shadowBlur = 0;
       });
     }
 
     function drawFrame() {
+      const rect = canvas.getBoundingClientRect();
       if (!replayMode && video.readyState >= 2) {
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
-        ctx.drawImage(video, 0, 0);
+        const vw = video.videoWidth;
+        const vh = video.videoHeight;
+        if (!vw || !vh) {
+          rafId = requestAnimationFrame(drawFrame);
+          return;
+        }
+
+        ctx.clearRect(0, 0, rect.width, rect.height);
+        
+        // Fit video without distortion
+        const videoAspect = vw / vh;
+        const canvasAspect = rect.width / rect.height;
+        let drawW, drawH, offsetX, offsetY;
+
+        if (videoAspect > canvasAspect) {
+          drawW = rect.width;
+          drawH = rect.width / videoAspect;
+          offsetX = 0;
+          offsetY = (rect.height - drawH) / 2;
+        } else {
+          drawH = rect.height;
+          drawW = rect.height * videoAspect;
+          offsetX = (rect.width - drawW) / 2;
+          offsetY = 0;
+        }
+        ctx.drawImage(video, 0, 0, vw, vh, offsetX, offsetY, drawW, drawH);
 
         // Capture frame during recording
         if (recording) {
-          offscreen.width = canvas.width;
-          offscreen.height = canvas.height;
+          offscreen.width = vw;
+          offscreen.height = vh;
           offCtx.drawImage(video, 0, 0);
           frames.push(offCtx.getImageData(0, 0, offscreen.width, offscreen.height));
         }
@@ -591,7 +602,29 @@
         drawCalibrationPoints();
       } else if (replayMode && frames.length > 0) {
         const frame = frames[replayIndex];
-        ctx.putImageData(frame, 0, 0);
+        ctx.clearRect(0, 0, rect.width, rect.height);
+        
+        offscreen.width = frame.width;
+        offscreen.height = frame.height;
+        offCtx.putImageData(frame, 0, 0);
+
+        const videoAspect = frame.width / frame.height;
+        const canvasAspect = rect.width / rect.height;
+        let drawW, drawH, offsetX, offsetY;
+
+        if (videoAspect > canvasAspect) {
+          drawW = rect.width;
+          drawH = rect.width / videoAspect;
+          offsetX = 0;
+          offsetY = (rect.height - drawH) / 2;
+        } else {
+          drawH = rect.height;
+          drawW = rect.height * videoAspect;
+          offsetX = (rect.width - drawW) / 2;
+          offsetY = 0;
+        }
+        ctx.drawImage(offscreen, 0, 0, frame.width, frame.height, offsetX, offsetY, drawW, drawH);
+        
         drawLine();
         drawCalibrationPoints();
       }
@@ -599,10 +632,30 @@
     }
 
     function showReplayFrame() {
+      const rect = canvas.getBoundingClientRect();
       const frame = frames[replayIndex];
-      canvas.width = frame.width;
-      canvas.height = frame.height;
-      ctx.putImageData(frame, 0, 0);
+      offscreen.width = frame.width;
+      offscreen.height = frame.height;
+      offCtx.putImageData(frame, 0, 0);
+      ctx.clearRect(0, 0, rect.width, rect.height);
+
+      const videoAspect = frame.width / frame.height;
+      const canvasAspect = rect.width / rect.height;
+      let drawW, drawH, offsetX, offsetY;
+
+      if (videoAspect > canvasAspect) {
+        drawW = rect.width;
+        drawH = rect.width / videoAspect;
+        offsetX = 0;
+        offsetY = (rect.height - drawH) / 2;
+      } else {
+        drawH = rect.height;
+        drawW = rect.height * videoAspect;
+        offsetX = (rect.width - drawW) / 2;
+        offsetY = 0;
+      }
+      ctx.drawImage(offscreen, 0, 0, frame.width, frame.height, offsetX, offsetY, drawW, drawH);
+
       drawLine();
       drawCalibrationPoints();
       frameInfo.textContent = `Frame ${replayIndex + 1} / ${frames.length}`;
@@ -611,13 +664,23 @@
     }
 
     async function startCamera(deviceId) {
-      const constraints = { video: deviceId ? { deviceId: { exact: deviceId } } : true, audio: false };
+      const constraints = { 
+        video: deviceId ? { deviceId: { exact: deviceId } } : true, 
+        audio: false 
+      };
       try {
         if (video.srcObject) {
           video.srcObject.getTracks().forEach(t => t.stop());
         }
         const stream = await navigator.mediaDevices.getUserMedia(constraints);
         video.srcObject = stream;
+        
+        await new Promise(resolve => {
+          video.onloadedmetadata = () => resolve();
+        });
+        
+        await video.play();
+
         if (!rafId) drawFrame();
       } catch (err) {
         errorEl.textContent = 'Camera error: ' + err.message;
@@ -701,26 +764,27 @@
       calibPoints = [];
     });
 
-<<<<<<< HEAD
     function handleInteraction(clientX, clientY) {
       const pt = getCanvasPoint(clientX, clientY);
       const cx = pt.x;
       const cy = pt.y;
 
-=======
-    function handleInteraction(clientX) {
->>>>>>> 7865bc78886a9083cf3d14685d294bcb006dba21
       if (calibrateMode) {
-        let px = getCanvasX(clientX) * canvas.width;
+        // Position overlay near click
+        calibOverlay.style.display = 'block';
+        calibOverlay.style.left = Math.min(window.innerWidth - 180, Math.max(10, clientX - 80)) + 'px';
+        calibOverlay.style.top = Math.min(window.innerHeight - 150, Math.max(10, clientY - 120)) + 'px';
         
-        calibOverlay.style.display = 'flex';
         calibInput.value = '';
-        calibInput.focus();
+        setTimeout(() => {
+          calibInput.focus();
+          calibInput.select();
+        }, 0);
 
         const handleOk = () => {
           let m = calibInput.value;
           if (m !== '' && !isNaN(parseFloat(m))) {
-            calibPoints.push({ pixelX: px, meters: parseFloat(m) });
+            calibPoints.push({ pixelX: cx, pixelY: cy, meters: parseFloat(m) });
             calibPoints.sort((a, b) => a.pixelX - b.pixelX);
           }
           cleanup();
@@ -742,7 +806,6 @@
         calibCancel.addEventListener('click', cleanup);
         window.addEventListener('keydown', handleKey);
       } else {
-<<<<<<< HEAD
         // Hit detection for horizontal line
         if (lineY !== null && Math.abs(cy - lineY) < 20) {
           draggingY = true;
@@ -750,15 +813,10 @@
           draggingX = true;
           lineX = cx / pt.vw;
         }
-=======
-        dragging = true;
-        lineX = getCanvasX(clientX);
->>>>>>> 7865bc78886a9083cf3d14685d294bcb006dba21
       }
     }
 
     // Mouse events
-<<<<<<< HEAD
     canvas.addEventListener('mousedown', e => { handleInteraction(e.clientX, e.clientY); });
     canvas.addEventListener('mousemove', e => { 
       if (draggingX && !calibrateMode) {
@@ -768,30 +826,20 @@
       }
     });
     canvas.addEventListener('mouseup', () => { draggingX = false; draggingY = false; });
-=======
-    canvas.addEventListener('mousedown', e => { handleInteraction(e.clientX); });
-    canvas.addEventListener('mousemove', e => { if (dragging && !calibrateMode) lineX = getCanvasX(e.clientX); });
-    canvas.addEventListener('mouseup', () => { dragging = false; });
->>>>>>> 7865bc78886a9083cf3d14685d294bcb006dba21
 
     // Touch events
     canvas.addEventListener('touchstart', e => { 
-      e.preventDefault(); 
-      handleInteraction(e.touches[0].clientX); 
+      handleInteraction(e.touches[0].clientX, e.touches[0].clientY); 
     }, { passive: false });
     canvas.addEventListener('touchmove', e => { 
       e.preventDefault(); 
-<<<<<<< HEAD
       if (draggingX && !calibrateMode) {
         lineX = getCanvasX(e.touches[0].clientX); 
       } else if (draggingY && !calibrateMode) {
         lineY = getCanvasPoint(0, e.touches[0].clientY).y;
       }
-=======
-      if (dragging && !calibrateMode) lineX = getCanvasX(e.touches[0].clientX); 
->>>>>>> 7865bc78886a9083cf3d14685d294bcb006dba21
     }, { passive: false });
-    canvas.addEventListener('touchend', () => { dragging = false; });
+    canvas.addEventListener('touchend', () => { draggingX = false; draggingY = false; });
   </script>
 </body>
 </html>
