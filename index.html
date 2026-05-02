@@ -528,9 +528,7 @@
         // Measurement display
         const meters = getMeters2D(lineX * vw, lineY, calibPoints);
         if (meters !== null) {
-          let finalMeters = meters;
-          
-          finalMeters = meters;
+          const finalMeters = meters;
 
           measurementValue.textContent = finalMeters.toFixed(2) + ' m';
           
