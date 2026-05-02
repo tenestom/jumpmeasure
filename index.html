@@ -367,9 +367,7 @@
 
     let rafId = null;
     let lineX = null;
-    let lineY = null;
     let draggingX = false;
-    let draggingY = false;
 
     // Recording state
     let recording = false;
@@ -465,25 +463,6 @@
       return null;
     }
 
-    function getMeters2D(x, y, points) {
-      if (!points || points.length < 3) return null;
-
-      let sum = 0;
-      let weightSum = 0;
-
-      for (const p of points) {
-        const dx = x - p.pixelX;
-        const dy = y - p.pixelY;
-
-        const dist = Math.sqrt(dx * dx + dy * dy);
-        const w = dist < 1e-6 ? 1e6 : 1 / (dist * dist);
-
-        sum += w * p.meters;
-        weightSum += w;
-      }
-
-      return sum / weightSum;
-    }
 
     function drawLine() {
       const pt = getCanvasPoint(0, 0); // Get layout info
@@ -492,16 +471,6 @@
       const vw = pt.vw;
       const vh = pt.vh;
 
-      // Calculate y_ref from calibration points (relative to video area)
-      let y_ref = vh * 0.8;
-      if (calibPoints.length > 0 && calibPoints[0].pixelY !== undefined) {
-        y_ref = calibPoints.reduce((acc, p) => acc + (p.pixelY || 0), 0) / calibPoints.length;
-      }
-
-      // Default lineY to y_ref if not set
-      if (lineY === null && calibPoints.length > 0) {
-        lineY = y_ref;
-      }
 
       // Draw Vertical Line (X-axis)
       if (lineX !== null) {
@@ -513,20 +482,9 @@
         ctx.lineWidth = 2;
         ctx.stroke();
 
-        // Draw Horizontal Line (Y-axis perspective)
-        if (lineY !== null) {
-          const py = oy + lineY;
-          ctx.beginPath();
-          ctx.moveTo(ox, py);
-          ctx.lineTo(ox + vw, py);
-          ctx.strokeStyle = '#3498db';
-          ctx.lineWidth = 2;
-          ctx.stroke();
-        }
 
         // Measurement display
-        const y = lineY !== null ? lineY : vh * 0.8;
-        const meters = getMeters2D(lineX * vw, y, calibPoints);
+        const meters = getInterpolatedValue(lineX * vw, calibPoints);
         if (meters !== null) {
           const finalMeters = meters;
 
@@ -819,13 +777,8 @@
         calibCancel.addEventListener('click', cleanup);
         window.addEventListener('keydown', handleKey);
       } else {
-        // Hit detection for horizontal line
-        if (lineY !== null && Math.abs(cy - lineY) < 20) {
-          draggingY = true;
-        } else {
-          draggingX = true;
-          lineX = cx / pt.vw;
-        }
+        draggingX = true;
+        lineX = cx / pt.vw;
       }
     }
 
@@ -834,11 +787,9 @@
     canvas.addEventListener('mousemove', e => { 
       if (draggingX && !calibrateMode) {
         lineX = getCanvasX(e.clientX);
-      } else if (draggingY && !calibrateMode) {
-        lineY = getCanvasPoint(0, e.clientY).y;
       }
     });
-    canvas.addEventListener('mouseup', () => { draggingX = false; draggingY = false; });
+    canvas.addEventListener('mouseup', () => { draggingX = false; });
 
     // Touch events
     canvas.addEventListener('touchstart', e => { 
@@ -848,11 +799,9 @@
       e.preventDefault(); 
       if (draggingX && !calibrateMode) {
         lineX = getCanvasX(e.touches[0].clientX); 
-      } else if (draggingY && !calibrateMode) {
-        lineY = getCanvasPoint(0, e.touches[0].clientY).y;
       }
     }, { passive: false });
-    canvas.addEventListener('touchend', () => { draggingX = false; draggingY = false; });
+    canvas.addEventListener('touchend', () => { draggingX = false; });
   </script>
 </body>
 </html>
