@@ -465,6 +465,27 @@
       return null;
     }
 
+    function getMeters2D(x, y, points) {
+      if (!points || points.length === 0) return null;
+
+      let sum = 0;
+      let weightSum = 0;
+
+      for (const p of points) {
+        const dx = x - p.pixelX;
+        const dy = y - p.pixelY;
+
+        const dist = Math.sqrt(dx * dx + dy * dy);
+
+        const w = dist < 1e-6 ? 1e6 : 1 / (dist * dist);
+
+        sum += w * p.meters;
+        weightSum += w;
+      }
+
+      return sum / weightSum;
+    }
+
     function drawLine() {
       const pt = getCanvasPoint(0, 0); // Get layout info
       const ox = pt.ox;
@@ -505,17 +526,11 @@
         }
 
         // Measurement display
-        const meters = getInterpolatedValue(lineX * vw, calibPoints);
+        const meters = getMeters2D(lineX * vw, lineY, calibPoints);
         if (meters !== null) {
           let finalMeters = meters;
           
-          // Apply perspective correction
-          if (lineY !== null) {
-            let scale = y_ref / lineY;
-            // Clamp scale to reasonable bounds
-            scale = Math.max(0.9, Math.min(1.1, scale));
-            finalMeters = meters * scale;
-          }
+          finalMeters = meters;
 
           measurementValue.textContent = finalMeters.toFixed(2) + ' m';
           
