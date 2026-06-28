@@ -379,6 +379,18 @@
     let calibrateMode = false;
     let calibPoints = []; // [{pixelX: number, pixelY: number, meters: number}]
 
+    // Zoom state
+    let zoomLevel = 1;       // 1 = no zoom, >1 = zoomed in
+    const ZOOM_MIN = 1;
+    const ZOOM_MAX = 8;
+    // Pan offset in CSS pixels relative to the canvas element's top-left
+    let panX = 0;
+    let panY = 0;
+    // Pinch tracking
+    let lastPinchDist = null;  // null when not pinching
+    let lastPinchMidX = 0;
+    let lastPinchMidY = 0;
+
     function resizeCanvas() {
       const rect = canvas.getBoundingClientRect();
       const dpr = window.devicePixelRatio || 1;
@@ -390,38 +402,80 @@
     window.addEventListener('resize', resizeCanvas);
     window.addEventListener('load', resizeCanvas);
 
-    function getCanvasPoint(clientX, clientY) {
+    // Returns the unzoomed image layout (before zoom transform is applied).
+    // ox/oy/vw/vh are in CSS pixels referring to where the image sits inside
+    // the canvas element at zoom=1.
+    function getBaseLayout() {
       const rect = canvas.getBoundingClientRect();
-      const vw = video.videoWidth || (replayMode && frames.length > 0 ? frames[replayIndex].width : 0);
-      const vh = video.videoHeight || (replayMode && frames.length > 0 ? frames[replayIndex].height : 0);
-      
-      if (!vw || !vh) {
-        return { x: clientX - rect.left, y: clientY - rect.top, vw: rect.width, vh: rect.height, ox: 0, oy: 0 };
+      const fw = video.videoWidth  || (replayMode && frames.length > 0 ? frames[replayIndex].width  : 0);
+      const fh = video.videoHeight || (replayMode && frames.length > 0 ? frames[replayIndex].height : 0);
+
+      if (!fw || !fh) {
+        return { ox: 0, oy: 0, vw: rect.width, vh: rect.height, cw: rect.width, ch: rect.height };
       }
-
-      const videoAspect = vw / vh;
+      const videoAspect = fw / fh;
       const canvasAspect = rect.width / rect.height;
-
       let drawW, drawH, offsetX, offsetY;
       if (videoAspect > canvasAspect) {
-        drawW = rect.width;
-        drawH = rect.width / videoAspect;
-        offsetX = 0;
-        offsetY = (rect.height - drawH) / 2;
+        drawW = rect.width;  drawH = rect.width / videoAspect;
+        offsetX = 0;         offsetY = (rect.height - drawH) / 2;
       } else {
-        drawH = rect.height;
-        drawW = rect.height * videoAspect;
-        offsetX = (rect.width - drawW) / 2;
-        offsetY = 0;
+        drawH = rect.height; drawW = rect.height * videoAspect;
+        offsetX = (rect.width - drawW) / 2; offsetY = 0;
       }
+      return { ox: offsetX, oy: offsetY, vw: drawW, vh: drawH, cw: rect.width, ch: rect.height };
+    }
 
+    // Clamp panX/panY so we can't pan past the image edges
+    function clampPan() {
+      const rect = canvas.getBoundingClientRect();
+      const { ox, oy, vw, vh } = getBaseLayout();
+      // Zoomed image dimensions
+      const zw = vw * zoomLevel;
+      const zh = vh * zoomLevel;
+      // Maximum allowed pan so the image never shows blank outside its bounds
+      const maxPanX = Math.max(0, (zw - rect.width)  / 2 + ox * zoomLevel);
+      const maxPanY = Math.max(0, (zh - rect.height) / 2 + oy * zoomLevel);
+      panX = Math.max(-maxPanX, Math.min(maxPanX, panX));
+      panY = Math.max(-maxPanY, Math.min(maxPanY, panY));
+    }
+
+    // Apply zoom around a focal point given in canvas CSS-pixel coordinates
+    function applyZoom(newZoom, focalClientX, focalClientY) {
+      const rect = canvas.getBoundingClientRect();
+      const localX = focalClientX - rect.left;
+      const localY = focalClientY - rect.top;
+      // Scale pan so the pixel under the focal point stays fixed
+      const ratio = newZoom / zoomLevel;
+      panX = localX - ratio * (localX - panX);
+      panY = localY - ratio * (localY - panY);
+      zoomLevel = newZoom;
+      clampPan();
+    }
+
+    // Convert a client-space point to image-relative (0..1) coordinates,
+    // accounting for the current zoom/pan transform.
+    function getCanvasPoint(clientX, clientY) {
+      const rect  = canvas.getBoundingClientRect();
+      const { ox, oy, vw, vh } = getBaseLayout();
+      // Canvas-local coords (CSS pixels)
+      const localX = clientX - rect.left;
+      const localY = clientY - rect.top;
+      // Invert the zoom/pan transform: canvas origin = rect centre + panOffset
+      const cx = rect.width  / 2;
+      const cy = rect.height / 2;
+      // Point in zoomed space relative to centre
+      const relX = localX - cx - panX + cx;
+      const relY = localY - cy - panY + cy;
+      // Unzoom back to base layout
+      const baseX = (relX - cx) / zoomLevel + cx;
+      const baseY = (relY - cy) / zoomLevel + cy;
+      // Subtract image offset so (0,0) = top-left of image
       return {
-        x: clientX - rect.left - offsetX,
-        y: clientY - rect.top - offsetY,
-        vw: drawW,
-        vh: drawH,
-        ox: offsetX,
-        oy: offsetY
+        x:  baseX - ox,
+        y:  baseY - oy,
+        vw, vh,
+        ox, oy
       };
     }
 
@@ -531,8 +585,23 @@
       });
     }
 
+    // Wraps drawing with zoom/pan transform applied around the canvas centre
+    function withZoomTransform(fn) {
+      const rect = canvas.getBoundingClientRect();
+      const cx = rect.width  / 2;
+      const cy = rect.height / 2;
+      ctx.save();
+      ctx.translate(cx + panX, cy + panY);
+      ctx.scale(zoomLevel, zoomLevel);
+      ctx.translate(-cx, -cy);
+      fn();
+      ctx.restore();
+    }
+
     function drawFrame() {
       const rect = canvas.getBoundingClientRect();
+      ctx.clearRect(0, 0, rect.width, rect.height);
+
       if (!replayMode && video.readyState >= 2) {
         const vw = video.videoWidth;
         const vh = video.videoHeight;
@@ -541,27 +610,13 @@
           return;
         }
 
-        ctx.clearRect(0, 0, rect.width, rect.height);
-        
-        // Fit video without distortion
-        const videoAspect = vw / vh;
-        const canvasAspect = rect.width / rect.height;
-        let drawW, drawH, offsetX, offsetY;
+        const { ox: offsetX, oy: offsetY, vw: drawW, vh: drawH } = getBaseLayout();
 
-        if (videoAspect > canvasAspect) {
-          drawW = rect.width;
-          drawH = rect.width / videoAspect;
-          offsetX = 0;
-          offsetY = (rect.height - drawH) / 2;
-        } else {
-          drawH = rect.height;
-          drawW = rect.height * videoAspect;
-          offsetX = (rect.width - drawW) / 2;
-          offsetY = 0;
-        }
-        ctx.drawImage(video, 0, 0, vw, vh, offsetX, offsetY, drawW, drawH);
+        withZoomTransform(() => {
+          ctx.drawImage(video, 0, 0, vw, vh, offsetX, offsetY, drawW, drawH);
+        });
 
-        // Capture frame during recording
+        // Capture frame during recording (always at native resolution)
         if (recording) {
           offscreen.width = vw;
           offscreen.height = vh;
@@ -569,35 +624,20 @@
           frames.push(offCtx.getImageData(0, 0, offscreen.width, offscreen.height));
         }
 
-        drawLine();
-        drawCalibrationPoints();
+        withZoomTransform(() => { drawLine(); drawCalibrationPoints(); });
+
       } else if (replayMode && frames.length > 0) {
         const frame = frames[replayIndex];
-        ctx.clearRect(0, 0, rect.width, rect.height);
-        
-        offscreen.width = frame.width;
+        offscreen.width  = frame.width;
         offscreen.height = frame.height;
         offCtx.putImageData(frame, 0, 0);
 
-        const videoAspect = frame.width / frame.height;
-        const canvasAspect = rect.width / rect.height;
-        let drawW, drawH, offsetX, offsetY;
+        const { ox: offsetX, oy: offsetY, vw: drawW, vh: drawH } = getBaseLayout();
 
-        if (videoAspect > canvasAspect) {
-          drawW = rect.width;
-          drawH = rect.width / videoAspect;
-          offsetX = 0;
-          offsetY = (rect.height - drawH) / 2;
-        } else {
-          drawH = rect.height;
-          drawW = rect.height * videoAspect;
-          offsetX = (rect.width - drawW) / 2;
-          offsetY = 0;
-        }
-        ctx.drawImage(offscreen, 0, 0, frame.width, frame.height, offsetX, offsetY, drawW, drawH);
-        
-        drawLine();
-        drawCalibrationPoints();
+        withZoomTransform(() => {
+          ctx.drawImage(offscreen, 0, 0, frame.width, frame.height, offsetX, offsetY, drawW, drawH);
+        });
+        withZoomTransform(() => { drawLine(); drawCalibrationPoints(); });
       }
       rafId = requestAnimationFrame(drawFrame);
     }
@@ -605,30 +645,17 @@
     function showReplayFrame() {
       const rect = canvas.getBoundingClientRect();
       const frame = frames[replayIndex];
-      offscreen.width = frame.width;
+      offscreen.width  = frame.width;
       offscreen.height = frame.height;
       offCtx.putImageData(frame, 0, 0);
       ctx.clearRect(0, 0, rect.width, rect.height);
 
-      const videoAspect = frame.width / frame.height;
-      const canvasAspect = rect.width / rect.height;
-      let drawW, drawH, offsetX, offsetY;
+      const { ox: offsetX, oy: offsetY, vw: drawW, vh: drawH } = getBaseLayout();
+      withZoomTransform(() => {
+        ctx.drawImage(offscreen, 0, 0, frame.width, frame.height, offsetX, offsetY, drawW, drawH);
+      });
+      withZoomTransform(() => { drawLine(); drawCalibrationPoints(); });
 
-      if (videoAspect > canvasAspect) {
-        drawW = rect.width;
-        drawH = rect.width / videoAspect;
-        offsetX = 0;
-        offsetY = (rect.height - drawH) / 2;
-      } else {
-        drawH = rect.height;
-        drawW = rect.height * videoAspect;
-        offsetX = (rect.width - drawW) / 2;
-        offsetY = 0;
-      }
-      ctx.drawImage(offscreen, 0, 0, frame.width, frame.height, offsetX, offsetY, drawW, drawH);
-
-      drawLine();
-      drawCalibrationPoints();
       frameInfo.textContent = `Frame ${replayIndex + 1} / ${frames.length}`;
       prevBtn.disabled = replayIndex === 0;
       nextBtn.disabled = replayIndex === frames.length - 1;
@@ -791,17 +818,62 @@
     });
     canvas.addEventListener('mouseup', () => { draggingX = false; });
 
-    // Touch events
-    canvas.addEventListener('touchstart', e => { 
-      handleInteraction(e.touches[0].clientX, e.touches[0].clientY); 
-    }, { passive: false });
-    canvas.addEventListener('touchmove', e => { 
-      e.preventDefault(); 
-      if (draggingX && !calibrateMode) {
-        lineX = getCanvasX(e.touches[0].clientX); 
+    // Touch events — single finger drags the line, two fingers pinch-to-zoom
+    canvas.addEventListener('touchstart', e => {
+      if (e.touches.length === 2) {
+        // Begin pinch: record initial distance and mid-point
+        const dx = e.touches[1].clientX - e.touches[0].clientX;
+        const dy = e.touches[1].clientY - e.touches[0].clientY;
+        lastPinchDist = Math.hypot(dx, dy);
+        lastPinchMidX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+        lastPinchMidY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+        draggingX = false;  // cancel any single-finger drag
+      } else if (e.touches.length === 1) {
+        lastPinchDist = null;
+        handleInteraction(e.touches[0].clientX, e.touches[0].clientY);
       }
     }, { passive: false });
-    canvas.addEventListener('touchend', () => { draggingX = false; });
+
+    canvas.addEventListener('touchmove', e => {
+      e.preventDefault();
+      if (e.touches.length === 2) {
+        // Pinch zoom
+        const dx = e.touches[1].clientX - e.touches[0].clientX;
+        const dy = e.touches[1].clientY - e.touches[0].clientY;
+        const dist = Math.hypot(dx, dy);
+        const midX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+        const midY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+        if (lastPinchDist !== null) {
+          const pinchRatio = dist / lastPinchDist;
+          const newZoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, zoomLevel * pinchRatio));
+          applyZoom(newZoom, midX, midY);
+        }
+        lastPinchDist = dist;
+        lastPinchMidX = midX;
+        lastPinchMidY = midY;
+      } else if (e.touches.length === 1 && draggingX && !calibrateMode) {
+        lineX = getCanvasX(e.touches[0].clientX);
+      }
+    }, { passive: false });
+
+    canvas.addEventListener('touchend', e => {
+      if (e.touches.length < 2) lastPinchDist = null;
+      if (e.touches.length === 0) draggingX = false;
+    });
+
+    // Desktop: Ctrl + scroll wheel to zoom
+    canvas.addEventListener('wheel', e => {
+      if (!e.ctrlKey && !e.metaKey) return;
+      e.preventDefault();
+      const delta = e.deltaY > 0 ? 0.9 : 1.1;  // scroll down = zoom out
+      const newZoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, zoomLevel * delta));
+      applyZoom(newZoom, e.clientX, e.clientY);
+    }, { passive: false });
+
+    // Reset zoom to 1× when recording starts (clean slate)
+    recordBtn.addEventListener('click', () => {
+      zoomLevel = 1; panX = 0; panY = 0;
+    }, true);  // capture phase so it runs before other listeners
   </script>
 </body>
 </html>
