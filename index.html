@@ -620,12 +620,14 @@
         const meters = getInterpolatedValue(lineX * vw, calibPoints);
         if (meters !== null) {
           const finalMeters = meters;
+          const adjustedMeters = finalMeters + 2.1;
 
-          measurementValue.textContent = finalMeters.toFixed(2) + ' m';
+          const displayText = `${adjustedMeters.toFixed(2)} m (${finalMeters.toFixed(2)} m)`;
+          measurementValue.textContent = displayText;
           
           ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
           ctx.font = '14px sans-serif';
-          ctx.fillText(finalMeters.toFixed(2) + 'm', px + 10, oy + 25);
+          ctx.fillText(displayText, px + 10, oy + 25);
         } else {
           measurementValue.textContent = '--.-- m';
         }
