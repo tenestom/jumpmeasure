@@ -870,10 +870,6 @@
       applyZoom(newZoom, e.clientX, e.clientY);
     }, { passive: false });
 
-    // Reset zoom to 1× when recording starts (clean slate)
-    recordBtn.addEventListener('click', () => {
-      zoomLevel = 1; panX = 0; panY = 0;
-    }, true);  // capture phase so it runs before other listeners
   </script>
 </body>
 </html>
