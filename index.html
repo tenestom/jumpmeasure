@@ -440,12 +440,14 @@
       panY = Math.max(-maxPanY, Math.min(maxPanY, panY));
     }
 
-    // Apply zoom around a focal point given in canvas CSS-pixel coordinates
+    // Apply zoom around a focal point given in client coordinates.
+    // localX/Y must be relative to the canvas CENTER to match the transform.
     function applyZoom(newZoom, focalClientX, focalClientY) {
       const rect = canvas.getBoundingClientRect();
-      const localX = focalClientX - rect.left;
-      const localY = focalClientY - rect.top;
-      // Scale pan so the pixel under the focal point stays fixed
+      // Focal point relative to canvas CENTER (not top-left)
+      const localX = focalClientX - rect.left - rect.width  / 2;
+      const localY = focalClientY - rect.top  - rect.height / 2;
+      // Keep the pixel under the focal point stationary
       const ratio = newZoom / zoomLevel;
       panX = localX - ratio * (localX - panX);
       panY = localY - ratio * (localY - panY);
