@@ -787,14 +787,6 @@
       }
     });
 
-    prevBtn.addEventListener('click', () => {
-      if (replayIndex > 0) { replayIndex--; showReplayFrame(); }
-    });
-
-    nextBtn.addEventListener('click', () => {
-      if (replayIndex < frames.length - 1) { replayIndex++; showReplayFrame(); }
-    });
-
     // Scrubber — drag to scrub through frames
     scrubber.addEventListener('input', () => {
       replayIndex = parseInt(scrubber.value, 10);
