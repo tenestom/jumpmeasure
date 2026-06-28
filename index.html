@@ -171,10 +171,56 @@
 
     #recordBtn  { background: #c0392b; font-weight: bold; }
     #stopBtn    { background: #444; }
-    #prevBtn, #nextBtn { background: #333; }
     #liveBtn    { background: #0070f3; }
     #calibBtn   { background: #e67e22; }
     #clearCalibBtn { background: #d35400; }
+
+    #scrubberBar {
+      position: absolute;
+      bottom: calc(90px + env(safe-area-inset-bottom, 0px));
+      left: 50%;
+      transform: translateX(-50%);
+      width: 90vw;
+      max-width: 700px;
+      display: none;           /* shown only in replay mode */
+      align-items: center;
+      z-index: 100;
+    }
+
+    #scrubber {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 100%;
+      height: 6px;
+      border-radius: 3px;
+      background: rgba(255,255,255,0.25);
+      outline: none;
+      cursor: pointer;
+    }
+    #scrubber::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      background: #fff;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.5);
+      cursor: pointer;
+    }
+    #scrubber::-moz-range-thumb {
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      background: #fff;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.5);
+      cursor: pointer;
+      border: none;
+    }
+    /* Filled track left of thumb */
+    #scrubber::-webkit-slider-runnable-track {
+      height: 6px;
+      border-radius: 3px;
+    }
 
     #frameInfo {
       position: absolute;
@@ -306,11 +352,12 @@
     <div id="recordControls">
       <button id="recordBtn">⏺ Record</button>
       <button id="stopBtn" disabled>⏹ Stop</button>
-      <button id="prevBtn" disabled>◀ Prev</button>
-      <button id="nextBtn" disabled>Next ▶</button>
       <button id="liveBtn" disabled>▶ Live</button>
       <button id="calibBtn">🎯 Calibrate</button>
       <button id="clearCalibBtn">Clear Calib</button>
+    </div>
+    <div id="scrubberBar">
+      <input type="range" id="scrubber" min="0" value="0" step="1">
     </div>
     <p id="frameInfo"></p>
     <p id="error"></p>
@@ -336,12 +383,12 @@
     const cameraSelect = document.getElementById('cameraSelect');
     const recordControls = document.getElementById('recordControls');
     const recordBtn = document.getElementById('recordBtn');
-    const stopBtn = document.getElementById('stopBtn');
-    const prevBtn = document.getElementById('prevBtn');
-    const nextBtn = document.getElementById('nextBtn');
-    const liveBtn = document.getElementById('liveBtn');
-    const calibBtn = document.getElementById('calibBtn');
+    const stopBtn   = document.getElementById('stopBtn');
+    const liveBtn   = document.getElementById('liveBtn');
+    const calibBtn  = document.getElementById('calibBtn');
     const clearCalibBtn = document.getElementById('clearCalibBtn');
+    const scrubberBar = document.getElementById('scrubberBar');
+    const scrubber    = document.getElementById('scrubber');
     const frameInfo = document.getElementById('frameInfo');
     const measurementValue = document.getElementById('measurementValue');
     const calibOverlay = document.getElementById('calibOverlay');
@@ -658,9 +705,9 @@
       });
       withZoomTransform(() => { drawLine(); drawCalibrationPoints(); });
 
+      // Sync scrubber thumb position
+      scrubber.value = replayIndex;
       frameInfo.textContent = `Frame ${replayIndex + 1} / ${frames.length}`;
-      prevBtn.disabled = replayIndex === 0;
-      nextBtn.disabled = replayIndex === frames.length - 1;
     }
 
     async function startCamera(deviceId) {
@@ -718,9 +765,8 @@
       replayMode = false;
       recordBtn.disabled = true;
       stopBtn.disabled = false;
-      prevBtn.disabled = true;
-      nextBtn.disabled = true;
       liveBtn.disabled = true;
+      scrubberBar.style.display = 'none';
       frameInfo.textContent = 'Recording...';
     });
 
@@ -731,8 +777,14 @@
       recordBtn.disabled = false;
       stopBtn.disabled = true;
       liveBtn.disabled = false;
-      if (frames.length > 0) showReplayFrame();
-      else frameInfo.textContent = 'No frames captured.';
+      if (frames.length > 0) {
+        scrubber.max = frames.length - 1;
+        scrubber.value = replayIndex;
+        scrubberBar.style.display = 'flex';
+        showReplayFrame();
+      } else {
+        frameInfo.textContent = 'No frames captured.';
+      }
     });
 
     prevBtn.addEventListener('click', () => {
@@ -743,11 +795,16 @@
       if (replayIndex < frames.length - 1) { replayIndex++; showReplayFrame(); }
     });
 
+    // Scrubber — drag to scrub through frames
+    scrubber.addEventListener('input', () => {
+      replayIndex = parseInt(scrubber.value, 10);
+      showReplayFrame();
+    });
+
     liveBtn.addEventListener('click', () => {
       replayMode = false;
       recording = false;
-      prevBtn.disabled = true;
-      nextBtn.disabled = true;
+      scrubberBar.style.display = 'none';
       liveBtn.disabled = true;
       recordBtn.disabled = false;
       stopBtn.disabled = true;
