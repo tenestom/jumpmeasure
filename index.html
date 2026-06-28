@@ -67,7 +67,7 @@
 
     #startBtn {
       position: absolute;
-      top: 50%;
+      top: calc(50% - 35px);
       left: 50%;
       transform: translate(-50%, -50%);
       z-index: 100;
@@ -84,6 +84,28 @@
 
     #startBtn:hover {
       background: #005bb5;
+      transform: translate(-50%, -50%) scale(1.05);
+    }
+
+    #uploadBtn {
+      position: absolute;
+      top: calc(50% + 35px);
+      left: 50%;
+      transform: translate(-50%, -50%);
+      z-index: 100;
+      padding: 1rem 2rem;
+      font-size: 1.2rem;
+      background: #333;
+      color: #fff;
+      border: none;
+      border-radius: 12px;
+      cursor: pointer;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+      transition: transform 0.2s;
+    }
+
+    #uploadBtn:hover {
+      background: #444;
       transform: translate(-50%, -50%) scale(1.05);
     }
 
@@ -171,6 +193,7 @@
 
     #recordBtn  { background: #c0392b; font-weight: bold; }
     #stopBtn    { background: #444; }
+    #playPauseBtn { background: #27ae60; font-weight: bold; }
     #liveBtn    { background: #0070f3; }
     #calibBtn   { background: #e67e22; }
     #clearCalibBtn { background: #d35400; }
@@ -348,10 +371,13 @@
       <canvas id="canvas"></canvas>
     </div>
     <button id="startBtn">Start Camera</button>
+    <button id="uploadBtn">Upload Clip</button>
+    <input type="file" id="uploadInput" accept="video/*" style="display:none;">
     <select id="cameraSelect"></select>
     <div id="recordControls">
       <button id="recordBtn">⏺ Record</button>
       <button id="stopBtn" disabled>⏹ Stop</button>
+      <button id="playPauseBtn" style="display:none;">⏸ Pause</button>
       <button id="liveBtn" disabled>▶ Live</button>
       <button id="calibBtn">🎯 Calibrate</button>
       <button id="clearCalibBtn">Clear Calib</button>
@@ -379,11 +405,14 @@
     const canvas = document.getElementById('canvas');
     const ctx = canvas.getContext('2d');
     const startBtn = document.getElementById('startBtn');
+    const uploadBtn = document.getElementById('uploadBtn');
+    const uploadInput = document.getElementById('uploadInput');
     const errorEl = document.getElementById('error');
     const cameraSelect = document.getElementById('cameraSelect');
     const recordControls = document.getElementById('recordControls');
     const recordBtn = document.getElementById('recordBtn');
     const stopBtn   = document.getElementById('stopBtn');
+    const playPauseBtn = document.getElementById('playPauseBtn');
     const liveBtn   = document.getElementById('liveBtn');
     const calibBtn  = document.getElementById('calibBtn');
     const clearCalibBtn = document.getElementById('clearCalibBtn');
@@ -418,6 +447,7 @@
 
     // Recording state
     let recording = false;
+    let uploadedVideoMode = false;
     let frames = [];       // array of ImageData
     let replayMode = false;
     let replayIndex = 0;
@@ -752,7 +782,68 @@
       await startCamera(null);
       await populateCameras();
       startBtn.style.display = 'none';
+      uploadBtn.style.display = 'none';
       recordControls.style.display = 'flex';
+    });
+
+    uploadBtn.addEventListener('click', () => {
+      uploadInput.click();
+    });
+
+    uploadInput.addEventListener('change', (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      if (video.srcObject) {
+        video.srcObject.getTracks().forEach(t => t.stop());
+        video.srcObject = null;
+      }
+      
+      video.src = URL.createObjectURL(file);
+      uploadedVideoMode = true;
+      replayMode = false;
+      recording = false;
+      
+      startBtn.style.display = 'none';
+      uploadBtn.style.display = 'none';
+      cameraSelect.style.display = 'none';
+      
+      recordBtn.style.display = 'none';
+      stopBtn.style.display = 'none';
+      playPauseBtn.style.display = 'inline-block';
+      liveBtn.textContent = '✖ Close';
+      liveBtn.disabled = false;
+      
+      recordControls.style.display = 'flex';
+      zoomLevel = 1; panX = 0; panY = 0;
+
+      video.onloadedmetadata = () => {
+        scrubber.max = video.duration;
+        scrubber.step = 0.01;
+        scrubber.value = 0;
+        scrubberBar.style.display = 'flex';
+        video.play();
+        playPauseBtn.textContent = '⏸ Pause';
+      };
+      
+      if (!rafId) drawFrame();
+    });
+
+    playPauseBtn.addEventListener('click', () => {
+      if (video.paused) {
+        video.play();
+        playPauseBtn.textContent = '⏸ Pause';
+      } else {
+        video.pause();
+        playPauseBtn.textContent = '▶ Play';
+      }
+    });
+
+    video.addEventListener('timeupdate', () => {
+      if (uploadedVideoMode && !video.paused) {
+        scrubber.value = video.currentTime;
+        frameInfo.textContent = `Time: ${video.currentTime.toFixed(2)}s / ${video.duration.toFixed(2)}s`;
+      }
     });
 
     cameraSelect.addEventListener('change', () => {
@@ -787,20 +878,48 @@
       }
     });
 
-    // Scrubber — drag to scrub through frames
+    // Scrubber — drag to scrub through frames or video time
     scrubber.addEventListener('input', () => {
-      replayIndex = parseInt(scrubber.value, 10);
-      showReplayFrame();
+      if (uploadedVideoMode) {
+        video.pause();
+        playPauseBtn.textContent = '▶ Play';
+        video.currentTime = parseFloat(scrubber.value);
+        frameInfo.textContent = `Time: ${video.currentTime.toFixed(2)}s / ${video.duration.toFixed(2)}s`;
+      } else {
+        replayIndex = parseInt(scrubber.value, 10);
+        showReplayFrame();
+      }
     });
 
     liveBtn.addEventListener('click', () => {
-      replayMode = false;
-      recording = false;
-      scrubberBar.style.display = 'none';
-      liveBtn.disabled = true;
-      recordBtn.disabled = false;
-      stopBtn.disabled = true;
-      frameInfo.textContent = '';
+      if (uploadedVideoMode) {
+        video.pause();
+        video.src = '';
+        uploadedVideoMode = false;
+        
+        recordControls.style.display = 'none';
+        scrubberBar.style.display = 'none';
+        startBtn.style.display = 'block';
+        uploadBtn.style.display = 'block';
+        frameInfo.textContent = '';
+        
+        liveBtn.textContent = '▶ Live';
+        recordBtn.style.display = 'inline-block';
+        stopBtn.style.display = 'inline-block';
+        playPauseBtn.style.display = 'none';
+        
+        const rect = canvas.getBoundingClientRect();
+        ctx.clearRect(0, 0, rect.width, rect.height);
+        zoomLevel = 1; panX = 0; panY = 0;
+      } else {
+        replayMode = false;
+        recording = false;
+        scrubberBar.style.display = 'none';
+        liveBtn.disabled = true;
+        recordBtn.disabled = false;
+        stopBtn.disabled = true;
+        frameInfo.textContent = '';
+      }
     });
 
     calibBtn.addEventListener('click', () => {
