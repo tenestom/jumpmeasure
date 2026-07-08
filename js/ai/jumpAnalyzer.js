@@ -274,50 +274,87 @@ export async function analyzeJump(frames, onProgress = () => {}) {
   }
 
   // Step 7: Find the precise X position of the mound
-  // Use weighted centroid of the brightest NEW pixels (frame vs background)
-  // weighted by brightness difference — this finds the mound center,
-  // not the edge of spray/wake noise
+  // Domain: The skier creates a TRAIL through the water. The measurement point
+  // is the FIRST small splash at the BEGINNING of this trail (closest to ramp).
+  // Further along there are bigger splashes — we ignore those.
+  //
+  // Strategy: scan column by column FROM THE RAMP SIDE inward.
+  // Find the first cluster of bright-vs-background pixels = the mound.
   if (landingFrame !== null) {
     const landingGray = toGrayscale(frames[landingFrame]);
-    // Also get the previous frame for comparison
-    const prevIdx = Math.max(0, landingFrame - 1);
-    const prevGrayLanding = toGrayscale(frames[prevIdx]);
     
-    let sumXWeighted = 0;
-    let sumWeight = 0;
-    
-    for (let y = ry1; y < ry2; y++) {
-      for (let x = rx1; x < rx2; x++) {
+    // Build a per-column brightness profile (how many bright pixels in each column)
+    const colBrightness = new Array(rx2 - rx1).fill(0);
+    for (let x = rx1; x < rx2; x++) {
+      let count = 0;
+      for (let y = ry1; y < ry2; y++) {
         const idx = y * width + x;
         const bgDiff = Math.abs(landingGray[idx] - bgGray[idx]);
-        const frameDiffVal = landingGray[idx] - prevGrayLanding[idx];
-        
-        // Pixel must be:
-        // 1. Significantly different from background (not static water)
-        // 2. Bright (water mound reflects light)
-        // 3. Getting brighter vs previous frame (new disturbance)
-        if (bgDiff > 30 && landingGray[idx] > 160 && frameDiffVal > 5) {
-          const weight = bgDiff * (landingGray[idx] / 255);
-          sumXWeighted += x * weight;
-          sumWeight += weight;
+        if (bgDiff > 25 && landingGray[idx] > 150) {
+          count++;
         }
+      }
+      colBrightness[x - rx1] = count;
+    }
+    
+    // Compute baseline column brightness (median)
+    const sortedCols = [...colBrightness].sort((a, b) => a - b);
+    const colMedian = sortedCols[Math.floor(sortedCols.length / 2)];
+    const colThreshold = Math.max(colMedian + 3, colMedian * 1.5, 2);
+    
+    // Scan from ramp side inward looking for first bright cluster
+    const scanColumns = [];
+    if (jumpDirection < 0) {
+      // Right-to-left: ramp is right, scan from RIGHT to LEFT
+      for (let i = colBrightness.length - 1; i >= 0; i--) scanColumns.push(i);
+    } else {
+      // Left-to-right: ramp is left, scan from LEFT to RIGHT
+      for (let i = 0; i < colBrightness.length; i++) scanColumns.push(i);
+    }
+    
+    // Find first cluster of bright columns (3+ consecutive above threshold)
+    let clusterStart = -1;
+    let clusterLen = 0;
+    let bestClusterStart = -1;
+    let bestClusterLen = 0;
+    
+    for (const i of scanColumns) {
+      if (colBrightness[i] > colThreshold) {
+        if (clusterLen === 0) clusterStart = i;
+        clusterLen++;
+        if (clusterLen >= 3 && bestClusterStart === -1) {
+          bestClusterStart = clusterStart;
+          bestClusterLen = clusterLen;
+          // Continue to find full extent of this cluster
+        }
+        if (bestClusterStart !== -1) {
+          bestClusterLen = clusterLen;
+        }
+      } else {
+        if (bestClusterStart !== -1) break; // Found and finished first cluster
+        clusterLen = 0;
       }
     }
-
-    if (sumWeight > 0) {
-      landingX = sumXWeighted / sumWeight;
-    } else {
-      // Fallback: centroid of all disturbed pixels
-      let sumX = 0, countX = 0;
-      for (let y = ry1; y < ry2; y++) {
-        for (let x = rx1; x < rx2; x++) {
-          const idx = y * width + x;
-          if (Math.abs(landingGray[idx] - bgGray[idx]) > 25 && landingGray[idx] > 150) {
-            sumX += x; countX++;
-          }
-        }
+    
+    if (bestClusterStart !== -1) {
+      // Center of the first cluster
+      const clusterMin = Math.min(bestClusterStart, bestClusterStart + (jumpDirection < 0 ? -bestClusterLen + 1 : bestClusterLen - 1));
+      const clusterMax = Math.max(bestClusterStart, bestClusterStart + (jumpDirection < 0 ? -bestClusterLen + 1 : bestClusterLen - 1));
+      
+      // Weighted centroid within this cluster only
+      let sumX = 0, sumW = 0;
+      for (let ci = clusterMin; ci <= clusterMax; ci++) {
+        const x = ci + rx1;
+        const w = colBrightness[ci];
+        sumX += x * w;
+        sumW += w;
       }
-      landingX = countX > 0 ? sumX / countX : lastKnownX;
+      landingX = sumW > 0 ? sumX / sumW : (clusterMin + clusterMax) / 2 + rx1;
+      console.log('[AI] X: first cluster cols', clusterMin + rx1, '-', clusterMax + rx1, 
+        '→ landingX:', Math.round(landingX), 'colThreshold:', colThreshold.toFixed(1));
+    } else {
+      landingX = lastKnownX;
+      console.log('[AI] X: no cluster found, using lastKnownX:', Math.round(lastKnownX));
     }
   }
 
