@@ -301,7 +301,7 @@ export async function analyzeJump(frames, onProgress = () => {}) {
   if (yRange > 20) confidence += 0.3;  // Clear vertical motion
   if (detectedFrames.length > 10) confidence += 0.2;  // Enough tracking data
   if (initialContactFrame !== null) confidence += 0.2;  // Contact detected
-  if (bestLandingScore > 100) confidence += 0.3;  // Strong splash signal
+  if (landingFrame !== null) confidence += 0.3;  // Landing detected
 
   confidence = Math.min(1, confidence);
 
