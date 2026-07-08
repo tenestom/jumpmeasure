@@ -191,6 +191,7 @@ video {
 #calibBtn   { background: #e67e22; }
 #clearCalibBtn { background: #d35400; }
 #aiDetectBtn { background: #9b59b6; font-weight: bold; }
+#aiFeedbackBtn { background: #27ae60; font-weight: bold; }
 
 #scrubberBar {
   position: absolute;

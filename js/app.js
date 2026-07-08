@@ -11,13 +11,16 @@ import {
   errorEl, cameraSelect, recordControls, recordBtn, stopBtn,
   playPauseBtn, liveBtn, scrubberBar, scrubber, frameInfo,
   homeScreen, appScreen, homeStartBtn, aiDetectBtn, aiStatus,
-  offscreen, offCtx
+  aiFeedbackBtn, offscreen, offCtx
 } from './dom.js';
 import { resizeCanvas, drawFrame, showReplayFrame, getCanvasX, applyZoom } from './rendering.js';
 import { handleInteraction, setupCalibrationListeners } from './calibration.js';
 import { startCamera, populateCameras } from './video.js';
 import { analyzeJump } from './ai/jumpAnalyzer.js';
 import { extractFrames } from './frameExtractor.js';
+
+// Store last AI result for feedback
+let lastAiResult = null;
 
 // --- Window setup ---
 window.addEventListener('resize', resizeCanvas);
@@ -271,6 +274,19 @@ if (aiDetectBtn) {
       });
 
       if (result.landingX !== null && result.confidence > 0.3) {
+        // Save AI result for feedback
+        lastAiResult = {
+          aiFrame: result.landingFrameIndex,
+          aiLineX: result.landingX,
+          aiLandingPixelX: Math.round(result.landingX * state.frames[0].width),
+          confidence: result.confidence,
+          peakFrame: result.peakFrame,
+          initialContact: result.initialContact,
+          totalFrames: state.frames.length,
+          frameWidth: state.frames[0].width,
+          frameHeight: state.frames[0].height,
+        };
+
         // Set the measurement line to the detected landing point
         state.lineX = result.landingX;
         
@@ -281,14 +297,19 @@ if (aiDetectBtn) {
         
         showReplayFrame();
 
+        // Show feedback button
+        if (aiFeedbackBtn) aiFeedbackBtn.style.display = 'inline-block';
+
         if (aiStatus) {
           const confidencePercent = Math.round(result.confidence * 100);
-          aiStatus.textContent = `Landing detected at frame ${result.landingFrameIndex + 1} (confidence: ${confidencePercent}%). Line placed — adjust if needed.`;
+          aiStatus.textContent = `Frame ${result.landingFrameIndex + 1}, X=${lastAiResult.aiLandingPixelX}px (${confidencePercent}%). Adjust line + frame, then click ✅ Send Correction.`;
           aiStatus.style.borderColor = result.confidence > 0.6 
             ? 'rgba(46, 204, 113, 0.5)' 
             : 'rgba(241, 196, 15, 0.5)';
         }
       } else {
+        lastAiResult = null;
+        if (aiFeedbackBtn) aiFeedbackBtn.style.display = 'none';
         if (aiStatus) {
           aiStatus.textContent = result.error || 'Could not detect landing. Try manual placement.';
           aiStatus.style.borderColor = 'rgba(231, 76, 60, 0.5)';
@@ -303,11 +324,66 @@ if (aiDetectBtn) {
     } finally {
       aiDetectBtn.disabled = false;
       aiDetectBtn.textContent = '🤖 AI Detect';
-      
-      // Hide status after 8 seconds
-      setTimeout(() => {
-        if (aiStatus) aiStatus.style.display = 'none';
-      }, 8000);
+    }
+  });
+}
+
+// --- AI Feedback → GitHub Issue ---
+if (aiFeedbackBtn) {
+  aiFeedbackBtn.addEventListener('click', () => {
+    if (!lastAiResult) return;
+
+    const correctedLineX = state.lineX;
+    const correctedFrame = state.replayIndex;
+    const correctedPixelX = correctedLineX !== null 
+      ? Math.round(correctedLineX * lastAiResult.frameWidth) 
+      : null;
+
+    const frameDelta = correctedFrame - lastAiResult.aiFrame;
+    const pixelDelta = correctedPixelX !== null ? correctedPixelX - lastAiResult.aiLandingPixelX : null;
+
+    const title = `AI Correction: frame ${frameDelta > 0 ? '+' : ''}${frameDelta}, X ${pixelDelta > 0 ? '+' : ''}${pixelDelta}px`;
+
+    const body = [
+      '## AI Landing Detection Correction',
+      '',
+      '| | AI suggestion | Corrected | Delta |',
+      '|---|---|---|---|',
+      `| Frame | ${lastAiResult.aiFrame} | ${correctedFrame} | ${frameDelta > 0 ? '+' : ''}${frameDelta} |`,
+      `| Pixel X | ${lastAiResult.aiLandingPixelX} | ${correctedPixelX} | ${pixelDelta > 0 ? '+' : ''}${pixelDelta} |`,
+      `| LineX (norm) | ${Math.round(lastAiResult.aiLineX * 10000) / 10000} | ${correctedLineX !== null ? Math.round(correctedLineX * 10000) / 10000 : 'n/a'} | |`,
+      '',
+      '### Video info',
+      `- Dimensions: ${lastAiResult.frameWidth}×${lastAiResult.frameHeight}`,
+      `- Total frames: ${lastAiResult.totalFrames}`,
+      `- AI confidence: ${Math.round(lastAiResult.confidence * 100)}%`,
+      `- Peak frame: ${lastAiResult.peakFrame}`,
+      `- Initial contact frame: ${lastAiResult.initialContact}`,
+      '',
+      '### JSON',
+      '```json',
+      JSON.stringify({
+        ai: { frame: lastAiResult.aiFrame, pixelX: lastAiResult.aiLandingPixelX, confidence: lastAiResult.confidence, peak: lastAiResult.peakFrame, contact: lastAiResult.initialContact },
+        corrected: { frame: correctedFrame, pixelX: correctedPixelX },
+        delta: { frames: frameDelta, pixelX: pixelDelta },
+        video: { w: lastAiResult.frameWidth, h: lastAiResult.frameHeight, frames: lastAiResult.totalFrames },
+      }),
+      '```',
+      '',
+      '### Notes',
+      '_Add any notes about this correction here (e.g. video name, conditions)_',
+    ].join('\n');
+
+    const url = `https://github.com/tenestom/jumpmeasure/issues/new?labels=ai-correction&title=${encodeURIComponent(title)}&body=${encodeURIComponent(body)}`;
+    
+    window.open(url, '_blank');
+    
+    aiFeedbackBtn.style.display = 'none';
+    if (aiStatus) {
+      aiStatus.style.display = 'block';
+      aiStatus.textContent = '📤 GitHub issue opened — submit it to save the correction!';
+      aiStatus.style.borderColor = 'rgba(46, 204, 113, 0.5)';
+      setTimeout(() => { aiStatus.style.display = 'none'; }, 5000);
     }
   });
 }

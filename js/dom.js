@@ -28,6 +28,7 @@ export const homeScreen = document.getElementById('homeScreen');
 export const appScreen = document.getElementById('appScreen');
 export const homeStartBtn = document.getElementById('homeStartBtn');
 export const aiStatus = document.getElementById('aiStatus');
+export const aiFeedbackBtn = document.getElementById('aiFeedbackBtn');
 
 // Offscreen canvas for frame capture
 export const offscreen = document.createElement('canvas');
