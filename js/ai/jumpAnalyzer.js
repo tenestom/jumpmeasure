@@ -204,8 +204,8 @@ export async function analyzeJump(frames, onProgress = () => {}) {
   const searchRegionW = Math.floor(width * 0.2);
   const rx1 = Math.max(0, lastKnownX - searchRegionW);
   const rx2 = Math.min(width, lastKnownX + searchRegionW);
-  const ry1 = Math.max(0, Math.floor(height * 0.25));
-  const ry2 = Math.min(height, Math.floor(height * 0.50));
+  const ry1 = Math.max(0, Math.floor(height * 0.35));
+  const ry2 = Math.min(height, Math.floor(height * 0.48));
 
   for (let f = searchStart; f <= searchEnd; f++) {
     const gray = toGrayscale(frames[f]);
@@ -241,7 +241,7 @@ export async function analyzeJump(frames, onProgress = () => {}) {
   // Compute baseline from first 8 frames of search window
   const baselineFrames = frameScores.slice(0, Math.min(8, frameScores.length));
   const baselineBright = baselineFrames.reduce((s, f) => s + f.bright, 0) / baselineFrames.length;
-  const brightnessThreshold = baselineBright * 1.04; // 4% above baseline
+  const brightnessThreshold = baselineBright * 1.03; // 3% above baseline
   
   console.log('[AI] baselineBright:', Math.round(baselineBright), 'threshold:', Math.round(brightnessThreshold));
 
