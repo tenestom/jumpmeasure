@@ -45,19 +45,29 @@ export function drawLine(ox, oy, vw, vh) {
     ctx.stroke();
 
     // Measurement display
+    // Show pixel X position for debugging/feedback
+    const pixelXDisplay = Math.round(state.lineX * vw);
     const meters = getInterpolatedValue(state.lineX * vw, state.calibPoints);
     if (meters !== null) {
       const finalMeters = meters;
       const adjustedMeters = finalMeters + 2.1;
 
       const displayText = `${adjustedMeters.toFixed(2)} m (${finalMeters.toFixed(2)} m)`;
-      measurementValue.textContent = displayText;
+      const debugText = `px: X=${pixelXDisplay}`;
+      measurementValue.textContent = `${displayText}  [${debugText}]`;
       
       ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
       ctx.font = '14px sans-serif';
       ctx.fillText(displayText, px + 10, oy + 25);
+      ctx.fillStyle = 'rgba(255, 255, 100, 0.8)';
+      ctx.font = '11px monospace';
+      ctx.fillText(debugText, px + 10, oy + 42);
     } else {
-      measurementValue.textContent = '--.-- m';
+      const debugText = `px: X=${pixelXDisplay}`;
+      measurementValue.textContent = `--.-- m  [${debugText}]`;
+      ctx.fillStyle = 'rgba(255, 255, 100, 0.8)';
+      ctx.font = '11px monospace';
+      ctx.fillText(debugText, px + 10, oy + 25);
     }
   } else {
     measurementValue.textContent = '--.-- m';

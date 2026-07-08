@@ -124,15 +124,21 @@ export async function analyzeJump(frames, onProgress = () => {}) {
   
   onProgress(0.7, 'Detecting landing point...');
 
-  // Step 4: Find landing
-  // After the peak, the jumper descends. Landing creates:
-  // 1. A rapid increase in Y (falling)
-  // 2. A splash (sudden brightness increase)
-  // 3. The "mound" of water ~0.1-0.5s after initial contact
+  // Step 4: Determine jumper direction (left-to-right or right-to-left)
+  // Compare X positions at start vs peak of flight
+  const earlyFrames = significantFrames.filter(t => t.frame < peakFrame.frame);
+  let jumpDirection = 0; // -1 = right-to-left, +1 = left-to-right
+  if (earlyFrames.length > 2) {
+    const startX = earlyFrames[0].cx;
+    const peakX = peakFrame.cx;
+    jumpDirection = peakX > startX ? 1 : -1;
+  }
 
+  // Step 5: Find initial water contact
+  // After the peak, the jumper descends. Contact = first frame where
+  // Y rises back significantly toward the waterline
   const postPeakFrames = significantFrames.filter(t => t.frame > peakFrame.frame);
   
-  // Find initial water contact: Y rises back toward waterline
   const yValues = significantFrames.map(t => t.cy);
   const yMin = Math.min(...yValues);
   const yMax = Math.max(...yValues);
@@ -140,97 +146,150 @@ export async function analyzeJump(frames, onProgress = () => {}) {
 
   let initialContactFrame = null;
   for (const t of postPeakFrames) {
-    if (t.cy > yMin + yRange * 0.6) {
+    if (t.cy > yMin + yRange * 0.5) {
       initialContactFrame = t.frame;
       break;
     }
   }
 
-  // If no clear contact from Y-position, use area-based detection
+  // Fallback: area spike (splash start)
   if (initialContactFrame === null && postPeakFrames.length > 0) {
-    // Look for sudden area increase (splash)
     for (let i = 1; i < postPeakFrames.length; i++) {
-      if (postPeakFrames[i].area > postPeakFrames[i-1].area * 1.5) {
+      if (postPeakFrames[i].area > postPeakFrames[i-1].area * 1.3) {
         initialContactFrame = postPeakFrames[i].frame;
         break;
       }
     }
   }
 
-  // Fallback: use the last frame of flight
   if (initialContactFrame === null) {
     initialContactFrame = postPeakFrames.length > 0 
-      ? postPeakFrames[postPeakFrames.length - 1].frame 
+      ? postPeakFrames[Math.floor(postPeakFrames.length * 0.5)].frame 
       : peakFrame.frame + 5;
   }
 
   onProgress(0.8, 'Locating water mound...');
 
-  // Step 5: Find the water "mound" — the precise landing measurement point
-  // Look for maximum splash/brightness change near the contact area
-  // The mound appears ~2-15 frames after initial contact at 30fps
-  
-  const searchStart = Math.max(0, initialContactFrame - 2);
-  const searchEnd = Math.min(totalFrames, initialContactFrame + 20);
-  
-  let bestLandingScore = 0;
-  let landingFrame = initialContactFrame;
-  let landingX = null;
+  // Step 6: Find the water "mound" — the precise landing measurement point
+  //
+  // Domain knowledge:
+  // - The mound appears ~0.3-0.7s AFTER initial ski-water contact
+  // - It's at the position where the BACK END of the ski hit the water
+  // - This is the FURTHEST point from the ramp in the splash zone
+  // - We detect it using frame-to-frame brightness change onset
+  //
+  // Strategy: 
+  // 1. For each frame in the search window, compute brightness change from PREVIOUS frame
+  //    (not from background) — this detects the moment the mound APPEARS
+  // 2. Find the first significant brightness spike (onset, not maximum)
+  // 3. X position = the edge of the disturbed water closest to the camera/furthest from ramp
 
-  // Get the last known X position near contact
+  // Get last known jumper X near contact for search region
   let lastKnownX = null;
   for (const t of trackingData.slice(Math.max(0, initialContactFrame - 10), initialContactFrame + 1)) {
     if (t.detected) lastKnownX = t.cx;
   }
+  if (lastKnownX === null) lastKnownX = peakFrame.cx;
 
-  if (lastKnownX === null) {
-    lastKnownX = peakFrame.cx;
-  }
+  // Search window: from initial contact to ~1s after
+  const fps = totalFrames / (totalFrames / 30); // Approximate
+  const searchStart = Math.max(0, initialContactFrame);
+  const searchEnd = Math.min(totalFrames - 1, initialContactFrame + 30); // ~1s at 30fps
+  
+  // Compute frame-to-frame change scores
+  const frameScores = [];
+  let prevGray = toGrayscale(frames[Math.max(0, searchStart - 1)]);
+  
+  // Widen search region — the splash zone can be quite wide
+  const searchRegionW = Math.floor(width * 0.2);
+  const rx1 = Math.max(0, lastKnownX - searchRegionW);
+  const rx2 = Math.min(width, lastKnownX + searchRegionW);
+  const ry1 = Math.max(0, Math.floor(height * 0.25));
+  const ry2 = Math.min(height, Math.floor(height * 0.50));
 
-  for (let f = searchStart; f < searchEnd; f++) {
+  for (let f = searchStart; f <= searchEnd; f++) {
     const gray = toGrayscale(frames[f]);
     
-    // Search in a region around the expected landing position
-    const searchXCenter = lastKnownX;
-    const rx1 = Math.max(0, Math.floor(searchXCenter - width * 0.08));
-    const rx2 = Math.min(width, Math.ceil(searchXCenter + width * 0.08));
-    const ry1 = Math.max(0, Math.floor(waterlineY - height * 0.08));
-    const ry2 = Math.min(height, Math.floor(waterlineY + height * 0.05));
-
-    // Calculate brightness difference from background in this region
-    let brightDiff = 0;
-    let brightAbs = 0;
-    let pixelCount = 0;
+    // Frame-to-frame change in the search region
+    let changeCount = 0;
+    let brightNewCount = 0;
     
     for (let y = ry1; y < ry2; y++) {
       for (let x = rx1; x < rx2; x++) {
         const idx = y * width + x;
-        const d = Math.abs(gray[idx] - bgGray[idx]);
-        if (d > 30) brightDiff++;
-        if (gray[idx] > 180) brightAbs++;
-        pixelCount++;
+        const frameDiff = gray[idx] - prevGray[idx];
+        // Look for pixels getting BRIGHTER (water splash = white)
+        if (frameDiff > 20) changeCount++;
+        // Also check if the pixel is newly bright vs background
+        if (gray[idx] > 170 && Math.abs(gray[idx] - bgGray[idx]) > 25) brightNewCount++;
+      }
+    }
+    
+    frameScores.push({ frame: f, change: changeCount, bright: brightNewCount });
+    prevGray = gray;
+  }
+
+  // Find the onset: first frame where change exceeds a threshold
+  // Use the median change as baseline, onset = first frame significantly above it
+  const changes = frameScores.map(s => s.change);
+  const medianChange = changes.slice().sort((a, b) => a - b)[Math.floor(changes.length / 2)];
+  const onsetThreshold = Math.max(medianChange * 3, 50);
+
+  let landingFrame = null;
+  let landingX = null;
+
+  // Find first significant change spike
+  for (const s of frameScores) {
+    if (s.change > onsetThreshold || s.bright > onsetThreshold) {
+      // Found the mound onset — but use a frame ~2-5 frames later 
+      // for the actual mound position (it takes a moment to form)
+      const moundFrame = Math.min(s.frame + 4, searchEnd);
+      landingFrame = moundFrame;
+      break;
+    }
+  }
+
+  // If no onset detected, use the frame with highest change rate
+  if (landingFrame === null && frameScores.length > 0) {
+    const best = frameScores.reduce((a, b) => a.change > b.change ? a : b);
+    landingFrame = best.frame;
+  }
+
+  // Step 7: Find the precise X position of the mound
+  // The measurement point is at the FURTHEST edge from the ramp
+  // (where the back of the ski touched the water)
+  if (landingFrame !== null) {
+    const landingGray = toGrayscale(frames[landingFrame]);
+    
+    // Find all disturbed water pixels (bright vs background)
+    const disturbedPixels = [];
+    for (let y = ry1; y < ry2; y++) {
+      for (let x = rx1; x < rx2; x++) {
+        const idx = y * width + x;
+        const diff = Math.abs(landingGray[idx] - bgGray[idx]);
+        if (diff > 25 && landingGray[idx] > 150) {
+          disturbedPixels.push(x);
+        }
       }
     }
 
-    const score = brightDiff * 0.7 + brightAbs * 0.3;
-
-    if (score > bestLandingScore) {
-      bestLandingScore = score;
-      landingFrame = f;
-      
-      // Refine X position using the centroid of bright pixels
-      let sumX = 0;
-      let countBright = 0;
-      for (let y = ry1; y < ry2; y++) {
-        for (let x = rx1; x < rx2; x++) {
-          const idx = y * width + x;
-          if (Math.abs(gray[idx] - bgGray[idx]) > 30) {
-            sumX += x;
-            countBright++;
-          }
-        }
+    if (disturbedPixels.length > 0) {
+      // The landing point is the edge CLOSEST to the ramp
+      // (back end of ski = trailing edge = nearest to where jumper came from)
+      if (jumpDirection < 0) {
+        // Jumper moves right-to-left: ramp is on right, landing edge = rightmost
+        disturbedPixels.sort((a, b) => b - a);
+        landingX = disturbedPixels[Math.floor(disturbedPixels.length * 0.05)];
+      } else if (jumpDirection > 0) {
+        // Jumper moves left-to-right: ramp is on left, landing edge = leftmost
+        disturbedPixels.sort((a, b) => a - b);
+        landingX = disturbedPixels[Math.floor(disturbedPixels.length * 0.05)];
+      } else {
+        // Unknown direction: use centroid
+        landingX = disturbedPixels.reduce((a, b) => a + b, 0) / disturbedPixels.length;
       }
-      landingX = countBright > 0 ? sumX / countBright : lastKnownX;
+    } else {
+      landingX = lastKnownX;
     }
   }
 
