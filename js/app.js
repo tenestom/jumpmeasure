@@ -328,8 +328,25 @@ if (aiDetectBtn) {
   });
 }
 
-// --- AI Feedback → GitHub Issue ---
+// --- AI Feedback → localStorage ---
+const CORRECTIONS_KEY = 'jumpmeasure_ai_corrections';
+
+function loadCorrections() {
+  try {
+    return JSON.parse(localStorage.getItem(CORRECTIONS_KEY) || '[]');
+  } catch { return []; }
+}
+
+function saveCorrection(correction) {
+  const all = loadCorrections();
+  all.push(correction);
+  // Keep max 200
+  localStorage.setItem(CORRECTIONS_KEY, JSON.stringify(all.slice(-200)));
+  return all.length;
+}
+
 if (aiFeedbackBtn) {
+  // Single click = save correction
   aiFeedbackBtn.addEventListener('click', () => {
     if (!lastAiResult) return;
 
@@ -339,53 +356,64 @@ if (aiFeedbackBtn) {
       ? Math.round(correctedLineX * lastAiResult.frameWidth) 
       : null;
 
-    const frameDelta = correctedFrame - lastAiResult.aiFrame;
-    const pixelDelta = correctedPixelX !== null ? correctedPixelX - lastAiResult.aiLandingPixelX : null;
+    const correction = {
+      ts: new Date().toISOString(),
+      ai: {
+        frame: lastAiResult.aiFrame,
+        pixelX: lastAiResult.aiLandingPixelX,
+        confidence: Math.round(lastAiResult.confidence * 100),
+        peak: lastAiResult.peakFrame,
+        contact: lastAiResult.initialContact,
+      },
+      corrected: { frame: correctedFrame, pixelX: correctedPixelX },
+      delta: {
+        frames: correctedFrame - lastAiResult.aiFrame,
+        pixelX: correctedPixelX !== null ? correctedPixelX - lastAiResult.aiLandingPixelX : null,
+      },
+      video: { w: lastAiResult.frameWidth, h: lastAiResult.frameHeight, frames: lastAiResult.totalFrames },
+    };
 
-    const title = `AI Correction: frame ${frameDelta > 0 ? '+' : ''}${frameDelta}, X ${pixelDelta > 0 ? '+' : ''}${pixelDelta}px`;
-
-    const body = [
-      '## AI Landing Detection Correction',
-      '',
-      '| | AI suggestion | Corrected | Delta |',
-      '|---|---|---|---|',
-      `| Frame | ${lastAiResult.aiFrame} | ${correctedFrame} | ${frameDelta > 0 ? '+' : ''}${frameDelta} |`,
-      `| Pixel X | ${lastAiResult.aiLandingPixelX} | ${correctedPixelX} | ${pixelDelta > 0 ? '+' : ''}${pixelDelta} |`,
-      `| LineX (norm) | ${Math.round(lastAiResult.aiLineX * 10000) / 10000} | ${correctedLineX !== null ? Math.round(correctedLineX * 10000) / 10000 : 'n/a'} | |`,
-      '',
-      '### Video info',
-      `- Dimensions: ${lastAiResult.frameWidth}×${lastAiResult.frameHeight}`,
-      `- Total frames: ${lastAiResult.totalFrames}`,
-      `- AI confidence: ${Math.round(lastAiResult.confidence * 100)}%`,
-      `- Peak frame: ${lastAiResult.peakFrame}`,
-      `- Initial contact frame: ${lastAiResult.initialContact}`,
-      '',
-      '### JSON',
-      '```json',
-      JSON.stringify({
-        ai: { frame: lastAiResult.aiFrame, pixelX: lastAiResult.aiLandingPixelX, confidence: lastAiResult.confidence, peak: lastAiResult.peakFrame, contact: lastAiResult.initialContact },
-        corrected: { frame: correctedFrame, pixelX: correctedPixelX },
-        delta: { frames: frameDelta, pixelX: pixelDelta },
-        video: { w: lastAiResult.frameWidth, h: lastAiResult.frameHeight, frames: lastAiResult.totalFrames },
-      }),
-      '```',
-      '',
-      '### Notes',
-      '_Add any notes about this correction here (e.g. video name, conditions)_',
-    ].join('\n');
-
-    const url = `https://github.com/tenestom/jumpmeasure/issues/new?labels=ai-correction&title=${encodeURIComponent(title)}&body=${encodeURIComponent(body)}`;
-    
-    window.open(url, '_blank');
+    const count = saveCorrection(correction);
     
     aiFeedbackBtn.style.display = 'none';
     if (aiStatus) {
       aiStatus.style.display = 'block';
-      aiStatus.textContent = '📤 GitHub issue opened — submit it to save the correction!';
+      aiStatus.textContent = `✅ Correction saved! (${count} total stored)`;
       aiStatus.style.borderColor = 'rgba(46, 204, 113, 0.5)';
-      setTimeout(() => { aiStatus.style.display = 'none'; }, 5000);
+      setTimeout(() => { aiStatus.style.display = 'none'; }, 3000);
     }
   });
+
+  // Long-press (1.5s) = export all corrections as JSON download
+  let pressTimer = null;
+  aiFeedbackBtn.addEventListener('mousedown', () => {
+    pressTimer = setTimeout(() => {
+      const all = loadCorrections();
+      if (all.length === 0) {
+        if (aiStatus) {
+          aiStatus.style.display = 'block';
+          aiStatus.textContent = 'No corrections stored yet.';
+          setTimeout(() => { aiStatus.style.display = 'none'; }, 2000);
+        }
+        return;
+      }
+      const blob = new Blob([JSON.stringify(all, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `ai_corrections_${new Date().toISOString().slice(0,10)}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      if (aiStatus) {
+        aiStatus.style.display = 'block';
+        aiStatus.textContent = `📥 Exported ${all.length} corrections as JSON file.`;
+        aiStatus.style.borderColor = 'rgba(46, 204, 113, 0.5)';
+        setTimeout(() => { aiStatus.style.display = 'none'; }, 3000);
+      }
+    }, 1500);
+  });
+  aiFeedbackBtn.addEventListener('mouseup', () => clearTimeout(pressTimer));
+  aiFeedbackBtn.addEventListener('mouseleave', () => clearTimeout(pressTimer));
 }
 
 // --- Mouse events ---
