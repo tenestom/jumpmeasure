@@ -200,10 +200,9 @@ export async function analyzeJump(frames, onProgress = () => {}) {
   const frameScores = [];
   let prevGray = toGrayscale(frames[Math.max(0, searchStart - 1)]);
   
-  // Widen search region
-  const searchRegionW = Math.floor(width * 0.2);
-  const rx1 = Math.max(0, lastKnownX - searchRegionW);
-  const rx2 = Math.min(width, lastKnownX + searchRegionW);
+  // Use FULL frame width for search (blob tracker lastKnownX is unreliable)
+  const rx1 = 0;
+  const rx2 = width;
   const ry1 = Math.max(0, Math.floor(height * 0.35));
   const ry2 = Math.min(height, Math.floor(height * 0.48));
 
@@ -233,33 +232,42 @@ export async function analyzeJump(frames, onProgress = () => {}) {
   let landingFrame = null;
   let landingX = null;
 
-  // Strategy: The mound creates a SUSTAINED brightness increase vs background.
-  // Frame-to-frame change (ch) is too noisy, but the bright-pixel count (br) 
-  // shows a subtle but consistent elevation when the mound forms.
-  // Use a 5-frame moving average to smooth noise, and detect the shift.
+  // Two-phase landing frame detection:
+  // Phase 1: Find the elevated brightness region (where mound exists)
+  // Phase 2: Within that region, find the frame with peak combined score
   
-  // Compute baseline from first 8 frames of search window
   const baselineFrames = frameScores.slice(0, Math.min(8, frameScores.length));
   const baselineBright = baselineFrames.reduce((s, f) => s + f.bright, 0) / baselineFrames.length;
-  const brightnessThreshold = baselineBright * 1.03; // 3% above baseline
+  const brightnessThreshold = baselineBright * 1.03; // 3% to find the elevated region
   
   console.log('[AI] baselineBright:', Math.round(baselineBright), 'threshold:', Math.round(brightnessThreshold));
 
-  // Scan with 5-frame moving average
+  // Phase 1: Find where the elevated region starts (5-frame moving avg)
+  let elevatedStart = null;
   for (let i = 4; i < frameScores.length; i++) {
     const window5 = frameScores.slice(i - 4, i + 1);
     const avgBright = window5.reduce((s, f) => s + f.bright, 0) / 5;
     
     if (avgBright > brightnessThreshold) {
-      // Use the center frame of the window
-      landingFrame = window5[2].frame;
-      console.log('[AI] Landing frame (moving avg shift):', landingFrame, 
-        'avgBright:', Math.round(avgBright), 'vs threshold:', Math.round(brightnessThreshold));
+      elevatedStart = window5[0].frame; // Start of the elevated region
       break;
     }
   }
 
-  // Fallback: frame with highest bright score in late window (contact + 15 onwards)
+  // Phase 2: Within the elevated region, find peak combined (change + bright) score
+  if (elevatedStart !== null) {
+    const elevatedScores = frameScores.filter(s => s.frame >= elevatedStart);
+    if (elevatedScores.length > 0) {
+      const peak = elevatedScores.reduce((a, b) => 
+        (a.change + a.bright) > (b.change + b.bright) ? a : b
+      );
+      landingFrame = peak.frame;
+      console.log('[AI] Landing frame (peak in elevated region):', landingFrame, 
+        'combined:', peak.change + peak.bright, 'region start:', elevatedStart);
+    }
+  }
+
+  // Fallback: frame with highest bright score in late window
   if (landingFrame === null) {
     const lateScores = frameScores.filter(s => s.frame >= initialContactFrame + 15);
     if (lateScores.length > 0) {
