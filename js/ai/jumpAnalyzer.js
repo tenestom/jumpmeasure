@@ -194,13 +194,13 @@ export async function analyzeJump(frames, onProgress = () => {}) {
   // Search window: from initial contact to ~1s after
   const fps = totalFrames / (totalFrames / 30); // Approximate
   const searchStart = Math.max(0, initialContactFrame);
-  const searchEnd = Math.min(totalFrames - 1, initialContactFrame + 30); // ~1s at 30fps
+  const searchEnd = Math.min(totalFrames - 1, initialContactFrame + 30);
   
   // Compute frame-to-frame change scores
   const frameScores = [];
   let prevGray = toGrayscale(frames[Math.max(0, searchStart - 1)]);
   
-  // Widen search region — the splash zone can be quite wide
+  // Widen search region
   const searchRegionW = Math.floor(width * 0.2);
   const rx1 = Math.max(0, lastKnownX - searchRegionW);
   const rx2 = Math.min(width, lastKnownX + searchRegionW);
@@ -210,7 +210,6 @@ export async function analyzeJump(frames, onProgress = () => {}) {
   for (let f = searchStart; f <= searchEnd; f++) {
     const gray = toGrayscale(frames[f]);
     
-    // Frame-to-frame change in the search region
     let changeCount = 0;
     let brightNewCount = 0;
     
@@ -218,9 +217,7 @@ export async function analyzeJump(frames, onProgress = () => {}) {
       for (let x = rx1; x < rx2; x++) {
         const idx = y * width + x;
         const frameDiff = gray[idx] - prevGray[idx];
-        // Look for pixels getting BRIGHTER (water splash = white)
         if (frameDiff > 20) changeCount++;
-        // Also check if the pixel is newly bright vs background
         if (gray[idx] > 170 && Math.abs(gray[idx] - bgGray[idx]) > 25) brightNewCount++;
       }
     }
@@ -229,30 +226,31 @@ export async function analyzeJump(frames, onProgress = () => {}) {
     prevGray = gray;
   }
 
-  // Find the onset: first frame where change exceeds a threshold
-  // Use the median change as baseline, onset = first frame significantly above it
-  const changes = frameScores.map(s => s.change);
-  const medianChange = changes.slice().sort((a, b) => a - b)[Math.floor(changes.length / 2)];
-  const onsetThreshold = Math.max(medianChange * 3, 50);
+  // Log diagnostics for debugging
+  console.log('[AI] initialContactFrame:', initialContactFrame, 'peakFrame:', peakFrame.frame);
+  console.log('[AI] frameScores:', frameScores.map(s => `f${s.frame}:ch=${s.change},br=${s.bright}`).join(' | '));
 
   let landingFrame = null;
   let landingX = null;
 
-  // Find first significant change spike
-  for (const s of frameScores) {
-    if (s.change > onsetThreshold || s.bright > onsetThreshold) {
-      // Found the mound onset — the mound takes ~0.3-0.5s to fully form
-      // At 30fps that's ~10-15 frames after first splash
-      const moundFrame = Math.min(s.frame + 12, searchEnd);
-      landingFrame = moundFrame;
-      break;
-    }
-  }
-
-  // If no onset detected, use the frame with highest change rate
-  if (landingFrame === null && frameScores.length > 0) {
+  // Strategy: find the frame with PEAK brightness change in a LATE window
+  // The mound appears well after initial contact — skip the first splash frames
+  // and look for the peak in the mound-formation window
+  const lateWindowStart = Math.min(initialContactFrame + 8, searchEnd);
+  const lateScores = frameScores.filter(s => s.frame >= lateWindowStart);
+  
+  if (lateScores.length > 0) {
+    // Find peak change rate in the late window
+    const peakScore = lateScores.reduce((a, b) => 
+      (a.change + a.bright) > (b.change + b.bright) ? a : b
+    );
+    landingFrame = peakScore.frame;
+    console.log('[AI] Landing frame (peak in late window):', landingFrame, 'score:', peakScore.change + peakScore.bright);
+  } else if (frameScores.length > 0) {
+    // Fallback: overall peak
     const best = frameScores.reduce((a, b) => a.change > b.change ? a : b);
     landingFrame = best.frame;
+    console.log('[AI] Landing frame (fallback overall peak):', landingFrame);
   }
 
   // Step 7: Find the precise X position of the mound
