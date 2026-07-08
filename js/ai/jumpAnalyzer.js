@@ -233,24 +233,44 @@ export async function analyzeJump(frames, onProgress = () => {}) {
   let landingFrame = null;
   let landingX = null;
 
-  // Strategy: find the frame with PEAK brightness change in a LATE window
-  // The mound appears well after initial contact — skip the first splash frames
-  // and look for the peak in the mound-formation window
-  const lateWindowStart = Math.min(initialContactFrame + 8, searchEnd);
-  const lateScores = frameScores.filter(s => s.frame >= lateWindowStart);
+  // Strategy: The mound creates a SUSTAINED brightness increase vs background.
+  // Frame-to-frame change (ch) is too noisy, but the bright-pixel count (br) 
+  // shows a subtle but consistent elevation when the mound forms.
+  // Use a 5-frame moving average to smooth noise, and detect the shift.
   
-  if (lateScores.length > 0) {
-    // Find peak change rate in the late window
-    const peakScore = lateScores.reduce((a, b) => 
-      (a.change + a.bright) > (b.change + b.bright) ? a : b
-    );
-    landingFrame = peakScore.frame;
-    console.log('[AI] Landing frame (peak in late window):', landingFrame, 'score:', peakScore.change + peakScore.bright);
-  } else if (frameScores.length > 0) {
-    // Fallback: overall peak
-    const best = frameScores.reduce((a, b) => a.change > b.change ? a : b);
-    landingFrame = best.frame;
-    console.log('[AI] Landing frame (fallback overall peak):', landingFrame);
+  // Compute baseline from first 8 frames of search window
+  const baselineFrames = frameScores.slice(0, Math.min(8, frameScores.length));
+  const baselineBright = baselineFrames.reduce((s, f) => s + f.bright, 0) / baselineFrames.length;
+  const brightnessThreshold = baselineBright * 1.04; // 4% above baseline
+  
+  console.log('[AI] baselineBright:', Math.round(baselineBright), 'threshold:', Math.round(brightnessThreshold));
+
+  // Scan with 5-frame moving average
+  for (let i = 4; i < frameScores.length; i++) {
+    const window5 = frameScores.slice(i - 4, i + 1);
+    const avgBright = window5.reduce((s, f) => s + f.bright, 0) / 5;
+    
+    if (avgBright > brightnessThreshold) {
+      // Use the center frame of the window
+      landingFrame = window5[2].frame;
+      console.log('[AI] Landing frame (moving avg shift):', landingFrame, 
+        'avgBright:', Math.round(avgBright), 'vs threshold:', Math.round(brightnessThreshold));
+      break;
+    }
+  }
+
+  // Fallback: frame with highest bright score in late window (contact + 15 onwards)
+  if (landingFrame === null) {
+    const lateScores = frameScores.filter(s => s.frame >= initialContactFrame + 15);
+    if (lateScores.length > 0) {
+      const best = lateScores.reduce((a, b) => a.bright > b.bright ? a : b);
+      landingFrame = best.frame;
+      console.log('[AI] Landing frame (fallback late peak):', landingFrame);
+    } else if (frameScores.length > 0) {
+      const best = frameScores.reduce((a, b) => a.bright > b.bright ? a : b);
+      landingFrame = best.frame;
+      console.log('[AI] Landing frame (fallback overall peak):', landingFrame);
+    }
   }
 
   // Step 7: Find the precise X position of the mound
