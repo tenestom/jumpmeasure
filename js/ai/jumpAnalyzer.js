@@ -241,9 +241,9 @@ export async function analyzeJump(frames, onProgress = () => {}) {
   // Find first significant change spike
   for (const s of frameScores) {
     if (s.change > onsetThreshold || s.bright > onsetThreshold) {
-      // Found the mound onset — but use a frame ~2-5 frames later 
-      // for the actual mound position (it takes a moment to form)
-      const moundFrame = Math.min(s.frame + 4, searchEnd);
+      // Found the mound onset — the mound takes ~0.3-0.5s to fully form
+      // At 30fps that's ~10-15 frames after first splash
+      const moundFrame = Math.min(s.frame + 12, searchEnd);
       landingFrame = moundFrame;
       break;
     }
@@ -256,40 +256,50 @@ export async function analyzeJump(frames, onProgress = () => {}) {
   }
 
   // Step 7: Find the precise X position of the mound
-  // The measurement point is at the FURTHEST edge from the ramp
-  // (where the back of the ski touched the water)
+  // Use weighted centroid of the brightest NEW pixels (frame vs background)
+  // weighted by brightness difference — this finds the mound center,
+  // not the edge of spray/wake noise
   if (landingFrame !== null) {
     const landingGray = toGrayscale(frames[landingFrame]);
+    // Also get the previous frame for comparison
+    const prevIdx = Math.max(0, landingFrame - 1);
+    const prevGrayLanding = toGrayscale(frames[prevIdx]);
     
-    // Find all disturbed water pixels (bright vs background)
-    const disturbedPixels = [];
+    let sumXWeighted = 0;
+    let sumWeight = 0;
+    
     for (let y = ry1; y < ry2; y++) {
       for (let x = rx1; x < rx2; x++) {
         const idx = y * width + x;
-        const diff = Math.abs(landingGray[idx] - bgGray[idx]);
-        if (diff > 25 && landingGray[idx] > 150) {
-          disturbedPixels.push(x);
+        const bgDiff = Math.abs(landingGray[idx] - bgGray[idx]);
+        const frameDiffVal = landingGray[idx] - prevGrayLanding[idx];
+        
+        // Pixel must be:
+        // 1. Significantly different from background (not static water)
+        // 2. Bright (water mound reflects light)
+        // 3. Getting brighter vs previous frame (new disturbance)
+        if (bgDiff > 30 && landingGray[idx] > 160 && frameDiffVal > 5) {
+          const weight = bgDiff * (landingGray[idx] / 255);
+          sumXWeighted += x * weight;
+          sumWeight += weight;
         }
       }
     }
 
-    if (disturbedPixels.length > 0) {
-      // The landing point is the edge CLOSEST to the ramp
-      // (back end of ski = trailing edge = nearest to where jumper came from)
-      if (jumpDirection < 0) {
-        // Jumper moves right-to-left: ramp is on right, landing edge = rightmost
-        disturbedPixels.sort((a, b) => b - a);
-        landingX = disturbedPixels[Math.floor(disturbedPixels.length * 0.05)];
-      } else if (jumpDirection > 0) {
-        // Jumper moves left-to-right: ramp is on left, landing edge = leftmost
-        disturbedPixels.sort((a, b) => a - b);
-        landingX = disturbedPixels[Math.floor(disturbedPixels.length * 0.05)];
-      } else {
-        // Unknown direction: use centroid
-        landingX = disturbedPixels.reduce((a, b) => a + b, 0) / disturbedPixels.length;
-      }
+    if (sumWeight > 0) {
+      landingX = sumXWeighted / sumWeight;
     } else {
-      landingX = lastKnownX;
+      // Fallback: centroid of all disturbed pixels
+      let sumX = 0, countX = 0;
+      for (let y = ry1; y < ry2; y++) {
+        for (let x = rx1; x < rx2; x++) {
+          const idx = y * width + x;
+          if (Math.abs(landingGray[idx] - bgGray[idx]) > 25 && landingGray[idx] > 150) {
+            sumX += x; countX++;
+          }
+        }
+      }
+      landingX = countX > 0 ? sumX / countX : lastKnownX;
     }
   }
 
