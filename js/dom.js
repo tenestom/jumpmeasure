@@ -32,4 +32,4 @@ export const aiFeedbackBtn = document.getElementById('aiFeedbackBtn');
 
 // Offscreen canvas for frame capture
 export const offscreen = document.createElement('canvas');
-export const offCtx = offscreen.getContext('2d');
+export const offCtx = offscreen.getContext('2d', { willReadFrequently: true });

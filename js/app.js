@@ -105,12 +105,17 @@ uploadInput.addEventListener('change', (e) => {
       aiStatus.style.borderColor = 'rgba(155, 89, 182, 0.3)';
     }
 
+    // Hide video during extraction to prevent strobe flicker
+    video.style.visibility = 'hidden';
+
     try {
       const extractedFrames = await extractFrames(video, offscreen, offCtx, (progress, msg) => {
         if (aiStatus) {
           aiStatus.textContent = msg;
         }
       });
+
+      video.style.visibility = 'visible';
 
       state.frames = extractedFrames;
       state.replayMode = true;
@@ -133,6 +138,7 @@ uploadInput.addEventListener('change', (e) => {
     } catch (err) {
       console.error('Frame extraction failed:', err);
       // Fallback: keep video mode, AI won't work but manual measurement still does
+      video.style.visibility = 'visible';
       video.currentTime = 0;
       video.play();
       playPauseBtn.textContent = '⏸ Pause';
