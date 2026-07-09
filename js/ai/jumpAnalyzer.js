@@ -278,14 +278,22 @@ export async function analyzeJump(frames, onProgress = () => {}) {
       if (smoothed[x] > peakVal) peakVal = smoothed[x];
     }
     
-    // Determine ramp side: whichever end has more space to frame edge = ramp side
-    const leftSpace = mainWake.start;
-    const rightSpace = width - mainWake.end;
-    const rampIsRight = rightSpace >= leftSpace;
+    // Determine ramp side: the BOAT is the biggest adjacent cluster.
+    // The ramp is on the OPPOSITE side from the boat.
+    const leftClusters = clusters.filter(c => c !== mainWake && c.end < mainWake.start);
+    const rightClusters = clusters.filter(c => c !== mainWake && c.start > mainWake.end);
+    const leftMass = leftClusters.reduce((s, c) => s + c.mass, 0);
+    const rightMass = rightClusters.reduce((s, c) => s + c.mass, 0);
+    
+    // Boat = side with more mass. Ramp = opposite side.
+    const boatIsLeft = leftMass >= rightMass;
+    const rampIsRight = boatIsLeft; // Ramp is opposite the boat
     
     const threshold = peakVal * 0.3; // 30% of peak = significant splash
     
-    console.log('[AI] X: rampSide:', rampIsRight ? 'right' : 'left', 
+    console.log('[AI] X: boatSide:', boatIsLeft ? 'left' : 'right',
+      '(leftMass:', leftMass, 'rightMass:', rightMass, ')',
+      'rampSide:', rampIsRight ? 'right' : 'left',
       'peak:', peakVal, 'threshold:', Math.round(threshold));
     
     // Scan from ramp side inward — first column above threshold = landing contact
