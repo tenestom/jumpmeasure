@@ -205,7 +205,7 @@ export async function analyzeJump(frames, onProgress = () => {}) {
   
   // Waterline Y zone (where skis meet water)
   const skiContactY = Math.floor(height * 0.42);
-  const skierSearchTop = Math.floor(height * 0.15);    // Above waterline (sky/flight zone)
+  const skierSearchTop = Math.floor(height * 0.35);    // Water surface zone (lighter bg)
   const skierSearchBottom = Math.floor(height * 0.48);  // Below waterline slightly
   
   console.log('[AI] initialContactFrame:', initialContactFrame, 'peakFrame:', peakFrame.frame);
@@ -276,27 +276,34 @@ export async function analyzeJump(frames, onProgress = () => {}) {
     `f${s.frame}:x=${s.x},lowY=${s.lowestY},dark=${s.darkScore}`
   ).join(' | '));
   
-  // Find the frame where the skier's lowest point FIRST reaches the waterline
-  // This is the landing frame (ski backs touch water)
+  // Find landing: the frame where darkScore SPIKES (skis enter water zone)
+  // First compute baseline darkScore (frames before landing = no skis in water)
+  const baselineEntries = skierTrack.slice(0, Math.min(5, skierTrack.length));
+  const baselineDark = baselineEntries.length > 0 
+    ? baselineEntries.reduce((s, e) => s + e.darkScore, 0) / baselineEntries.length 
+    : 0;
+  const spikeThreshold = Math.max(baselineDark * 2, baselineDark + 20, 10);
+  
+  console.log('[AI] baselineDark:', Math.round(baselineDark), 'spikeThreshold:', Math.round(spikeThreshold));
+  
   for (const entry of skierTrack) {
-    if (entry.lowestY >= skiContactY && entry.darkScore > 50) {
+    if (entry.darkScore > spikeThreshold && entry.frame > searchStart + 3) {
       landingFrame = entry.frame;
       landingX = entry.x;
-      console.log('[AI] Landing: frame', landingFrame, 'x:', landingX, 
-        'lowestY:', entry.lowestY, 'skiContactY:', skiContactY);
+      console.log('[AI] Landing (dark spike): frame', landingFrame, 'x:', landingX, 
+        'darkScore:', entry.darkScore);
       break;
     }
   }
   
-  // Fallback: if no clear waterline contact, use the frame with the lowest Y
+  // Fallback: frame with highest darkScore
   if (landingFrame === null && skierTrack.length > 0) {
-    const validEntries = skierTrack.filter(e => e.darkScore > 30);
-    if (validEntries.length > 0) {
-      const bestEntry = validEntries.reduce((a, b) => a.lowestY > b.lowestY ? a : b);
+    const bestEntry = skierTrack.reduce((a, b) => a.darkScore > b.darkScore ? a : b);
+    if (bestEntry.darkScore > 5) {
       landingFrame = bestEntry.frame;
       landingX = bestEntry.x;
-      console.log('[AI] Landing (fallback lowest Y): frame', landingFrame, 'x:', landingX, 
-        'lowestY:', bestEntry.lowestY);
+      console.log('[AI] Landing (fallback peak dark): frame', landingFrame, 'x:', landingX, 
+        'darkScore:', bestEntry.darkScore);
     }
   }
 
