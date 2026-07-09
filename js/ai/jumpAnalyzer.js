@@ -255,17 +255,16 @@ export async function analyzeJump(frames, onProgress = () => {}) {
       clusters.push({ start: cStart, end: width - 1, width: width - cStart, mass });
     }
     
-    console.log('[AI] X: clusters:', clusters.map(c => 
-      `[${c.start}-${c.end}](w=${c.width},m=${c.mass})`).join(' '));
-    
     // The landing splash is WITHIN the largest cluster (the main wake).
-    // Find the PEAK of the colProfile within this cluster = the brightest splash
+    // The landing CONTACT is at the RAMP SIDE edge of the wake (where splash first appears).
+    // The skier lands and slides away from the ramp, creating more wake.
+    // Strategy: find the ramp side, then scan inward to find the first significant splash.
     const mainWake = clusters.reduce((a, b) => a.mass > b.mass ? a : b);
     
     console.log('[AI] X: mainWake [', mainWake.start, '-', mainWake.end, 
       '] mass:', mainWake.mass);
     
-    // Smooth the profile within the main wake for peak detection
+    // Smooth the profile within the main wake
     const smoothed = new Array(width).fill(0);
     for (let x = mainWake.start + 5; x <= mainWake.end - 5; x++) {
       let sum = 0;
@@ -273,19 +272,41 @@ export async function analyzeJump(frames, onProgress = () => {}) {
       smoothed[x] = sum;
     }
     
-    // Find the highest peak within the main wake
-    let peakCol = mainWake.start, peakVal = 0;
+    // Find peak value for threshold
+    let peakVal = 0;
     for (let x = mainWake.start; x <= mainWake.end; x++) {
-      if (smoothed[x] > peakVal) {
-        peakVal = smoothed[x];
-        peakCol = x;
+      if (smoothed[x] > peakVal) peakVal = smoothed[x];
+    }
+    
+    // Determine ramp side: whichever end has more space to frame edge = ramp side
+    const leftSpace = mainWake.start;
+    const rightSpace = width - mainWake.end;
+    const rampIsRight = rightSpace >= leftSpace;
+    
+    const threshold = peakVal * 0.3; // 30% of peak = significant splash
+    
+    console.log('[AI] X: rampSide:', rampIsRight ? 'right' : 'left', 
+      'peak:', peakVal, 'threshold:', Math.round(threshold));
+    
+    // Scan from ramp side inward — first column above threshold = landing contact
+    if (rampIsRight) {
+      for (let x = mainWake.end; x >= mainWake.start; x--) {
+        if (smoothed[x] > threshold) {
+          landingX = x;
+          break;
+        }
+      }
+    } else {
+      for (let x = mainWake.start; x <= mainWake.end; x++) {
+        if (smoothed[x] > threshold) {
+          landingX = x;
+          break;
+        }
       }
     }
     
-    landingX = peakCol;
-    console.log('[AI] X: peak at native', peakCol, 
-      'normalized:', (peakCol / width).toFixed(4),
-      'peakVal:', peakVal);
+    console.log('[AI] X: landing at native', landingX, 
+      'normalized:', (landingX / width).toFixed(4));
   }
   
   // Final fallback
