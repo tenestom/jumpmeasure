@@ -204,13 +204,13 @@ export async function analyzeJump(frames, onProgress = () => {}) {
   const searchEnd = Math.min(totalFrames - 1, safeContactFrame + 30);
   
   // Waterline Y zone (where skis meet water)
-  const waterlineY = Math.floor(height * 0.42);
+  const skiContactY = Math.floor(height * 0.42);
   const skierSearchTop = Math.floor(height * 0.15);    // Above waterline (sky/flight zone)
   const skierSearchBottom = Math.floor(height * 0.48);  // Below waterline slightly
   
   console.log('[AI] initialContactFrame:', initialContactFrame, 'peakFrame:', peakFrame.frame);
   console.log('[AI] Skier tracking: searchStart:', searchStart, 'searchEnd:', searchEnd, 
-    'waterlineY:', waterlineY);
+    'skiContactY:', skiContactY);
   
   let landingFrame = null;
   let landingX = null;
@@ -276,11 +276,11 @@ export async function analyzeJump(frames, onProgress = () => {}) {
   // Find the frame where the skier's lowest point FIRST reaches the waterline
   // This is the landing frame (ski backs touch water)
   for (const entry of skierTrack) {
-    if (entry.lowestY >= waterlineY && entry.darkScore > 50) {
+    if (entry.lowestY >= skiContactY && entry.darkScore > 50) {
       landingFrame = entry.frame;
       landingX = entry.x;
       console.log('[AI] Landing: frame', landingFrame, 'x:', landingX, 
-        'lowestY:', entry.lowestY, 'waterlineY:', waterlineY);
+        'lowestY:', entry.lowestY, 'skiContactY:', skiContactY);
       break;
     }
   }
