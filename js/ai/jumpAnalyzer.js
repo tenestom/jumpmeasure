@@ -221,7 +221,8 @@ export async function analyzeJump(frames, onProgress = () => {}) {
   for (let f = searchStart; f <= searchEnd; f++) {
     const gray = toGrayscale(frames[f]);
     
-    // Build column "darkness" profile — pixels DARKER than background (skier is dark)
+    // Build column "darkness" profile — pixels that are NEW dark features
+    // (dark in current frame but NOT dark in background = skier, not boat)
     const darkProfile = new Array(width).fill(null).map(() => ({ count: 0, lowestY: 0 }));
     for (let x = 0; x < width; x++) {
       let darkCount = 0;
@@ -229,7 +230,9 @@ export async function analyzeJump(frames, onProgress = () => {}) {
       for (let y = skierSearchTop; y < skierSearchBottom; y++) {
         const idx = y * width + x;
         const darkerThanBg = bgGray[idx] - gray[idx];
-        if (darkerThanBg > 30) { // Significantly darker than background
+        // Must be: dark NOW, but was LIGHT in background (new dark object = skier)
+        // Boat is dark in both → filtered out
+        if (darkerThanBg > 30 && bgGray[idx] > 120) {
           darkCount++;
           if (y > lowestDarkY) lowestDarkY = y;
         }
