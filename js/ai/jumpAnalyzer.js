@@ -399,10 +399,12 @@ export async function analyzeJump(frames, onProgress = () => {}) {
     
     if (motionClusters.length > 0) {
       // Skier = closest motion cluster to the ramp
+      // Use the edge AWAY from the ramp = the skier's current position
+      // (they moved away from ramp between ref frame and landing frame)
       const skierCluster = motionClusters.reduce((a, b) => 
         a.distToRamp < b.distToRamp ? a : b);
       
-      landingX = skierCluster.cx;
+      landingX = rampIsRight ? skierCluster.start : skierCluster.end;
       console.log('[AI] Skier found: x=', landingX, 
         'dist to ramp:', skierCluster.distToRamp,
         'cluster:', skierCluster.start, '-', skierCluster.end);
