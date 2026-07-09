@@ -368,7 +368,7 @@ export async function analyzeJump(frames, onProgress = () => {}) {
   }
   
   // Use ramp Y as waterline reference. If no ramp found, estimate from frame.
-  const waterlineY = rampNativeY || Math.floor(height * 0.30);
+  const rampWaterY = rampNativeY || Math.floor(height * 0.30);
   
   // Search zone: exclude the ramp, search from predicted position outward
   const rampStart = rampNativeX ? (rampIsRight ? rampNativeX - 30 : 0) : width;
@@ -381,14 +381,14 @@ export async function analyzeJump(frames, onProgress = () => {}) {
   const diffThreshold = 30;
   
   for (let x = searchXStart; x < searchXEnd; x++) {
-    let topY = waterlineY; // default: no vertical extent
-    for (let y = Math.max(0, waterlineY - Math.floor(height * 0.2)); y < waterlineY; y++) {
+    let topY = rampWaterY; // default: no vertical extent
+    for (let y = Math.max(0, rampWaterY - Math.floor(height * 0.2)); y < rampWaterY; y++) {
       if (landDiff[y * width + x] > diffThreshold) {
         topY = y;
         break;
       }
     }
-    verticalExtent[x] = waterlineY - topY; // how many pixels above waterline
+    verticalExtent[x] = rampWaterY - topY; // how many pixels above waterline
   }
   
   // Smooth vertical extent
@@ -425,7 +425,7 @@ export async function analyzeJump(frames, onProgress = () => {}) {
     }
   }
   
-  console.log('[AI] Vertical profile: waterlineY:', waterlineY, 'minExtent:', minVertExtent,
+  console.log('[AI] Vertical profile: waterlineY:', rampWaterY, 'minExtent:', minVertExtent,
     'predX:', predX, 'clusters:', skierClusters.map(c => 
       `[${c.start}-${c.end}](w=${c.width},cx=${c.cx},ve=${Math.round(c.maxVE)},dist=${c.distToPred})`).join(' '));
   
@@ -437,16 +437,16 @@ export async function analyzeJump(frames, onProgress = () => {}) {
     landingX = skierCluster.cx;
     
     // Build blobBox for visualization
-    let topY = waterlineY;
+    let topY = rampWaterY;
     for (let xx = skierCluster.start; xx <= skierCluster.end; xx++) {
       const extent = verticalExtent[xx];
-      if (waterlineY - extent < topY) topY = waterlineY - extent;
+      if (rampWaterY - extent < topY) topY = rampWaterY - extent;
     }
     blobBox = {
       x: skierCluster.start / width,
       y: topY / height,
       w: skierCluster.width / width,
-      h: (waterlineY - topY + 20) / height
+      h: (rampWaterY - topY + 20) / height
     };
     
     console.log('[AI] Skier found: x=', landingX, 
