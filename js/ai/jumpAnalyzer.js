@@ -357,8 +357,20 @@ export async function analyzeJump(frames, onProgress = () => {}) {
         if (adjacent.length === 1) {
           moundCluster = adjacent[0];
         } else if (adjacent.length > 1) {
-          // Pick the smaller adjacent cluster (mound is smaller than extended wake)
-          moundCluster = adjacent.reduce((a, b) => a.mass < b.mass ? a : b);
+          // Two adjacent clusters = one on each side of the wake.
+          // The mound is on the RAMP SIDE. The ramp side has more frame space
+          // (camera shows the approach/ramp with more room).
+          const leftSpace = mainWake.start;          // pixels from left edge to wake
+          const rightSpace = width - mainWake.end;   // pixels from wake to right edge
+          
+          // Pick the adjacent cluster on the side with MORE space = ramp side
+          const rampSide = leftSpace >= rightSpace ? 'left' : 'right';
+          const rampCluster = adjacent.find(c => 
+            rampSide === 'left' ? c.end < mainWake.start : c.start > mainWake.end
+          );
+          moundCluster = rampCluster || adjacent[0];
+          console.log('[AI] X: leftSpace:', leftSpace, 'rightSpace:', rightSpace, 
+            'rampSide:', rampSide, 'picked:', moundCluster.start, '-', moundCluster.end);
         }
         
         if (moundCluster) {
