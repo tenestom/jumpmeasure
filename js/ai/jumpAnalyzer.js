@@ -205,119 +205,93 @@ export async function analyzeJump(frames, onProgress = () => {}) {
   console.log('[AI] initialContactFrame:', initialContactFrame, 'peakFrame:', peakFrame.frame);
   console.log('[AI] Landing frame (contact+7):', landingFrame);
   
-  // For X: analyze a LATER frame where the splash/wake is visible
-  // The splash appears ~15-25 frames after ski contact
-  const splashFrame = Math.min(safeContactFrame + 23, totalFrames - 1);
-  const splashGray = toGrayscale(frames[splashFrame]);
+  // SKIER DETECTION: Find the skier directly in the landing frame.
+  // Compare landing frame to a reference frame (5 frames before) to find what MOVED.
+  // The skier is a compact dark object that moved into the waterline zone.
   
-  // Build bgDiff column profile at waterline
-  const splashRy1 = Math.floor(height * 0.35);
-  const splashRy2 = Math.floor(height * 0.48);
+  const refFrame = Math.max(0, landingFrame - 5);
+  const landingGray = toGrayscale(frames[landingFrame]);
+  const refGray = toGrayscale(frames[refFrame]);
   
-  // Triple filter: brighter than both background AND pre-splash frame
-  const preSplashGray = toGrayscale(frames[Math.max(0, splashFrame - 4)]);
-  const colProfile = new Array(width).fill(0);
-  let totalNewPixels = 0;
+  // Search zone: around the waterline where skis touch (y=20-55% of height)
+  const skierY1 = Math.floor(height * 0.20);
+  const skierY2 = Math.floor(height * 0.55);
   
-  for (let y = splashRy1; y < splashRy2; y++) {
-    for (let x = 0; x < width; x++) {
+  // Build column difference profile: |landingFrame - refFrame|
+  // High threshold to ignore camera shake (shake causes small diffs, skier causes large)
+  const diffProfile = new Array(width).fill(0);
+  
+  for (let x = 0; x < width; x++) {
+    let diffSum = 0;
+    for (let y = skierY1; y < skierY2; y++) {
       const idx = y * width + x;
-      const vsPreSplash = splashGray[idx] - preSplashGray[idx];
-      const vsBg = splashGray[idx] - bgGray[idx];
-      if (vsPreSplash > 30 && vsBg > 30 && splashGray[idx] > 180) {
-        colProfile[x]++;
-        totalNewPixels++;
-      }
+      const diff = Math.abs(landingGray[idx] - refGray[idx]);
+      if (diff > 40) diffSum += diff; // High threshold: only strong changes
     }
+    diffProfile[x] = diffSum;
   }
   
-  console.log('[AI] X: splashFrame:', splashFrame, 'totalNewPixels:', totalNewPixels);
+  // Smooth with 10px window
+  const smoothDiff = new Array(width).fill(0);
+  for (let x = 5; x < width - 5; x++) {
+    let sum = 0;
+    for (let dx = -5; dx <= 5; dx++) sum += diffProfile[x + dx];
+    smoothDiff[x] = sum;
+  }
   
-  if (totalNewPixels > 5) {
-    // Find clusters
-    const clusters = [];
-    let cStart = -1;
-    for (let x = 0; x < width; x++) {
-      if (colProfile[x] > 0) {
-        if (cStart === -1) cStart = x;
-      } else {
-        if (cStart !== -1) {
-          let mass = 0;
-          for (let cx = cStart; cx <= x - 1; cx++) mass += colProfile[cx];
-          clusters.push({ start: cStart, end: x - 1, width: x - cStart, mass });
-          cStart = -1;
-        }
-      }
-    }
-    if (cStart !== -1) {
-      let mass = 0;
-      for (let cx = cStart; cx < width; cx++) mass += colProfile[cx];
-      clusters.push({ start: cStart, end: width - 1, width: width - cStart, mass });
-    }
-    
-    // The landing splash is WITHIN the largest cluster (the main wake).
-    // The landing CONTACT is at the RAMP SIDE edge of the wake (where splash first appears).
-    // The skier lands and slides away from the ramp, creating more wake.
-    // Strategy: find the ramp side, then scan inward to find the first significant splash.
-    const mainWake = clusters.reduce((a, b) => a.mass > b.mass ? a : b);
-    
-    console.log('[AI] X: mainWake [', mainWake.start, '-', mainWake.end, 
-      '] mass:', mainWake.mass);
-    
-    // Smooth the profile within the main wake
-    const smoothed = new Array(width).fill(0);
-    for (let x = mainWake.start + 5; x <= mainWake.end - 5; x++) {
-      let sum = 0;
-      for (let dx = -5; dx <= 5; dx++) sum += colProfile[x + dx];
-      smoothed[x] = sum;
-    }
-    
-    // Find peak value for threshold
-    let peakVal = 0;
-    for (let x = mainWake.start; x <= mainWake.end; x++) {
-      if (smoothed[x] > peakVal) peakVal = smoothed[x];
-    }
-    
-    // Determine ramp side: the BOAT is the biggest adjacent cluster.
-    // The ramp is on the OPPOSITE side from the boat.
-    const leftClusters = clusters.filter(c => c !== mainWake && c.end < mainWake.start);
-    const rightClusters = clusters.filter(c => c !== mainWake && c.start > mainWake.end);
-    const leftMass = leftClusters.reduce((s, c) => s + c.mass, 0);
-    const rightMass = rightClusters.reduce((s, c) => s + c.mass, 0);
-    
-    // Boat = side with more mass. Ramp = opposite side.
-    const boatIsLeft = leftMass >= rightMass;
-    const rampIsRight = boatIsLeft; // Ramp is opposite the boat
-    
-    const threshold = peakVal * 0.3; // 30% of peak = significant splash
-    
-    console.log('[AI] X: boatSide:', boatIsLeft ? 'left' : 'right',
-      '(leftMass:', leftMass, 'rightMass:', rightMass, ')',
-      'rampSide:', rampIsRight ? 'right' : 'left',
-      'peak:', peakVal, 'threshold:', Math.round(threshold));
-    
-    // Scan from ramp side inward — first column above threshold = landing contact
-    if (rampIsRight) {
-      for (let x = mainWake.end; x >= mainWake.start; x--) {
-        if (smoothed[x] > threshold) {
-          landingX = x;
-          break;
-        }
-      }
+  // Find clusters of significant change (potential skier regions)
+  const diffMedian = [...smoothDiff].sort((a, b) => a - b)[Math.floor(width * 0.5)];
+  const diffThreshold = Math.max(diffMedian * 3, 500);
+  
+  const skierClusters = [];
+  let cStart = -1;
+  for (let x = 0; x < width; x++) {
+    if (smoothDiff[x] > diffThreshold) {
+      if (cStart === -1) cStart = x;
     } else {
-      for (let x = mainWake.start; x <= mainWake.end; x++) {
-        if (smoothed[x] > threshold) {
-          landingX = x;
-          break;
+      if (cStart !== -1) {
+        const cWidth = x - cStart;
+        // Skier is compact: 15-150px wide
+        if (cWidth >= 15 && cWidth <= 150) {
+          let mass = 0, weightedX = 0;
+          for (let cx = cStart; cx < x; cx++) {
+            mass += smoothDiff[cx];
+            weightedX += cx * smoothDiff[cx];
+          }
+          const centroid = Math.round(weightedX / mass);
+          skierClusters.push({ start: cStart, end: x - 1, width: cWidth, mass, centroid });
         }
+        cStart = -1;
       }
     }
-    
-    console.log('[AI] X: landing at native', landingX, 
-      'normalized:', (landingX / width).toFixed(4));
+  }
+  if (cStart !== -1) {
+    const cWidth = width - cStart;
+    if (cWidth >= 15 && cWidth <= 150) {
+      let mass = 0, weightedX = 0;
+      for (let cx = cStart; cx < width; cx++) {
+        mass += smoothDiff[cx];
+        weightedX += cx * smoothDiff[cx];
+      }
+      const centroid = Math.round(weightedX / mass);
+      skierClusters.push({ start: cStart, end: width - 1, width: cWidth, mass, centroid });
+    }
   }
   
-  // Final fallback
+  console.log('[AI] Skier detection in frame', landingFrame, 
+    '(ref:', refFrame, ') diffThreshold:', Math.round(diffThreshold));
+  console.log('[AI] Skier clusters:', skierClusters.map(c => 
+    `[${c.start}-${c.end}](w=${c.width},m=${Math.round(c.mass)},cx=${c.centroid})`).join(' '));
+  
+  if (skierClusters.length > 0) {
+    // Pick the cluster with the highest mass = the skier
+    const skierCluster = skierClusters.reduce((a, b) => a.mass > b.mass ? a : b);
+    landingX = skierCluster.centroid;
+    console.log('[AI] Skier found: centroid =', landingX, 
+      'native, normalized:', (landingX / width).toFixed(4));
+  }
+  
+  // Fallback
   if (landingX === null) {
     landingX = lastKnownX || width / 2;
     console.log('[AI] X: fallback lastKnownX:', Math.round(landingX));
