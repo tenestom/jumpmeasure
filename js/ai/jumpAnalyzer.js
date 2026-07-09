@@ -377,37 +377,50 @@ export async function analyzeJump(frames, onProgress = () => {}) {
     }
     
     // Find motion clusters
-    const motionClusters = [];
-    cStart = -1;
-    for (let x = 0; x < width; x++) {
-      if (motionProfile[x] > 2) {
-        if (cStart === -1) cStart = x;
-      } else {
-        if (cStart !== -1) {
-          let mass = 0;
-          for (let cx = cStart; cx < x; cx++) mass += motionProfile[cx];
-          const cx = Math.round((cStart + x - 1) / 2);
-          const distToRamp = Math.abs(cx - rampNativeX);
-          motionClusters.push({ start: cStart, end: x - 1, width: x - cStart, mass, cx, distToRamp });
-          cStart = -1;
+    // Smooth motion profile
+    const smoothMotion = new Array(width).fill(0);
+    for (let x = 5; x < width - 5; x++) {
+      let sum = 0;
+      for (let dx = -5; dx <= 5; dx++) sum += motionProfile[x + dx];
+      smoothMotion[x] = sum;
+    }
+    
+    // Find LOCAL PEAKS in the smoothed motion profile
+    // The skier and boat both create peaks, but skier's peak is closest to ramp
+    const peaks = [];
+    for (let x = 10; x < width - 10; x++) {
+      if (smoothMotion[x] > smoothMotion[x - 5] && 
+          smoothMotion[x] > smoothMotion[x + 5] &&
+          smoothMotion[x] > 20) { // minimum peak height
+        // Check if this is a real local max (not just a plateau)
+        let isPeak = true;
+        for (const p of peaks) {
+          if (Math.abs(p.x - x) < 30) { // too close to another peak
+            if (smoothMotion[x] > p.val) {
+              peaks.splice(peaks.indexOf(p), 1); // replace with stronger
+            } else {
+              isPeak = false;
+            }
+            break;
+          }
+        }
+        if (isPeak) {
+          peaks.push({ x, val: smoothMotion[x], distToRamp: Math.abs(x - rampNativeX) });
         }
       }
     }
     
-    console.log('[AI] Motion at rampY:', motionClusters.map(c => 
-      `[${c.start}-${c.end}](w=${c.width},m=${c.mass},dist=${c.distToRamp})`).join(' '));
+    console.log('[AI] Motion peaks:', peaks.map(p => 
+      `x=${p.x}(val=${p.val},dist=${p.distToRamp})`).join(' '));
     
-    if (motionClusters.length > 0) {
-      // Skier = closest motion cluster to the ramp
-      // Use the edge AWAY from the ramp = the skier's current position
-      // (they moved away from ramp between ref frame and landing frame)
-      const skierCluster = motionClusters.reduce((a, b) => 
+    if (peaks.length > 0) {
+      // Skier = the peak CLOSEST to the ramp
+      const skierPeak = peaks.reduce((a, b) => 
         a.distToRamp < b.distToRamp ? a : b);
       
-      landingX = rampIsRight ? skierCluster.start : skierCluster.end;
-      console.log('[AI] Skier found: x=', landingX, 
-        'dist to ramp:', skierCluster.distToRamp,
-        'cluster:', skierCluster.start, '-', skierCluster.end);
+      landingX = skierPeak.x;
+      console.log('[AI] Skier peak: x=', landingX, 
+        'dist to ramp:', skierPeak.distToRamp, 'val:', skierPeak.val);
     }
   }
   
