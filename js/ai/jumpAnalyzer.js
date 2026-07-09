@@ -209,7 +209,8 @@ export async function analyzeJump(frames, onProgress = () => {}) {
   // STEP 1: LOCATE RAMP using vertical edge detection at horizon zone
   // The ramp has STRAIGHT EDGES (triangle sides) that create strong vertical edges.
   let rampMarkerX = 0, rampMarkerY = 0;
-  let rampNativeX = null, rampNativeY = null;
+  let rampNativeX = null, rampNativeY = null, rampNativeTopY = null;
+  let rampNativeStartX = null, rampNativeEndX = null;
   
   // First determine ramp side from splash data
   const splashFrame = Math.min(safeContactFrame + 23, totalFrames - 1);
@@ -320,7 +321,20 @@ export async function analyzeJump(frames, onProgress = () => {}) {
         ? edgeClusters.reduce((a, b) => a.cx > b.cx ? a : b)
         : edgeClusters.reduce((a, b) => a.cx < b.cx ? a : b);
       
-      // Find ramp base Y (bottom of the ramp = waterline)
+      // Find ramp top Y and base Y
+      let rampTopY = horizonY2;
+      for (let y = horizonY1; y < horizonY2; y++) {
+        let rowEdge = 0;
+        for (let x = rampCluster.start; x <= rampCluster.end; x++) {
+          const left = bgGray[y * width + (x - 2)];
+          const right = bgGray[y * width + (x + 2)];
+          rowEdge += Math.abs(right - left);
+        }
+        if (rowEdge > maxEdge * 0.1) {
+          rampTopY = y;
+          break;
+        }
+      }
       let rampBaseY = horizonY2;
       for (let y = horizonY2; y > horizonY1; y--) {
         let rowEdge = 0;
@@ -338,21 +352,26 @@ export async function analyzeJump(frames, onProgress = () => {}) {
       rampNativeX = rampCluster.cx;
       rampNativeY = rampBaseY;
       rampMarkerX = rampCluster.cx / width;
-      rampMarkerY = rampBaseY / height;
+      rampMarkerY = rampTopY / height;
       
-      console.log('[AI] Ramp located: x=', rampCluster.cx, 'baseY=', rampBaseY,
+      // Save ramp dimensions for skier search
+      rampNativeTopY = rampTopY;
+      rampNativeStartX = rampCluster.start;
+      rampNativeEndX = rampCluster.end;
+      
+      console.log('[AI] Ramp located: x=', rampCluster.cx, 
+        'topY=', rampTopY, 'baseY=', rampBaseY, 'height=', rampBaseY - rampTopY,
         'cluster:', rampCluster.start, '-', rampCluster.end);
     }
   }
   
-  // STEP 2: FIND SKIER USING VERTICAL PROFILE
-  // The skier is a standing person — their diff extends HIGH ABOVE the waterline.
-  // Wake/splash only creates diff AT the waterline (flat).
-  // For each column: measure how high above ramp Y the diff extends.
-  // Columns with tall vertical extent = the skier.
+  // STEP 2: FIND SKIER USING COLUMN-TO-NEIGHBOR COMPARISON
+  // The skier blocks the background — their columns look different from neighboring columns.
+  // No background model needed. Compare each column to its local neighbors in the SAME frame.
+  // Scan from the ramp edge outward — first significant deviation = the skier.
   let blobBox = null;
   
-  // Get predicted X from flight phase (for search zone)
+  // Get predicted X from flight phase (for disambiguation)
   let predX = lastKnownX || (peakFrame ? peakFrame.cx : width / 2);
   for (let f = Math.max(0, safeContactFrame - 5); f <= safeContactFrame; f++) {
     if (f < trackingData.length && trackingData[f].detected && trackingData[f].area < 5000) {
@@ -360,84 +379,98 @@ export async function analyzeJump(frames, onProgress = () => {}) {
     }
   }
   
-  // Compute diff for landing frame
   const landGray = toGrayscale(frames[landingFrame]);
-  const landDiff = new Uint8Array(width * height);
-  for (let i = 0; i < landGray.length; i++) {
-    landDiff[i] = Math.min(255, Math.abs(landGray[i] - bgGray[i]));
-  }
   
-  // Use ramp Y as waterline reference. If no ramp found, estimate from frame.
+  // Use ramp dimensions
   const rampWaterY = rampNativeY || Math.floor(height * 0.30);
+  const rampHeight = (rampNativeTopY && rampNativeY) ? (rampNativeY - rampNativeTopY) : Math.floor(height * 0.08);
   
-  // Search zone: exclude the ramp, search from predicted position outward
-  const rampStart = rampNativeX ? (rampIsRight ? rampNativeX - 30 : 0) : width;
-  const rampEnd = rampNativeX ? (rampIsRight ? width : rampNativeX + 30) : 0;
-  const searchXStart = rampIsRight ? 0 : rampEnd;
-  const searchXEnd = rampIsRight ? rampStart : width;
+  // Vertical strip: from rampTopY to rampBaseY (same height as ramp, = approx skier height)
+  const stripTop = Math.max(0, rampWaterY - rampHeight);
+  const stripBot = rampWaterY;
+  const stripH = stripBot - stripTop;
   
-  // For each column: find highest Y with diff > threshold (= top of motion)
-  const verticalExtent = new Array(width).fill(0);
-  const diffThreshold = 15; // Low threshold: dark skier vs dark trees
+  // Determine scan direction: from ramp edge outward
+  // If ramp is right, scan LEFT from ramp. If ramp is left, scan RIGHT.
+  const rampEdge = rampIsRight 
+    ? (rampNativeStartX || Math.floor(width * 0.7))
+    : (rampNativeEndX || Math.floor(width * 0.3));
   
-  // Debug: log diff values at predicted skier position
-  const debugX = Math.round(predX);
-  let debugDiffs = [];
-  for (let y = Math.max(0, rampWaterY - Math.floor(height * 0.15)); y < rampWaterY; y++) {
-    debugDiffs.push(landDiff[y * width + debugX]);
-  }
-  console.log('[AI] Diff at predX=', debugX, 'from y=', 
-    Math.max(0, rampWaterY - Math.floor(height * 0.15)), 'to y=', rampWaterY,
-    'max:', Math.max(...debugDiffs), 'vals:', debugDiffs.slice(0, 20).join(','));
-  
-  for (let x = searchXStart; x < searchXEnd; x++) {
-    let topY = rampWaterY; // default: no vertical extent
-    for (let y = Math.max(0, rampWaterY - Math.floor(height * 0.2)); y < rampWaterY; y++) {
-      if (landDiff[y * width + x] > diffThreshold) {
-        topY = y;
-        break;
-      }
-    }
-    verticalExtent[x] = rampWaterY - topY; // how many pixels above waterline
-  }
-  
-  // Smooth vertical extent
-  const smoothVert = new Array(width).fill(0);
-  for (let x = searchXStart + 3; x < searchXEnd - 3; x++) {
+  // For each column: compute average brightness in the strip above waterline
+  const colAvg = new Array(width).fill(0);
+  for (let x = 0; x < width; x++) {
     let sum = 0;
-    for (let dx = -3; dx <= 3; dx++) sum += verticalExtent[x + dx];
-    smoothVert[x] = sum / 7;
+    for (let y = stripTop; y < stripBot; y++) {
+      sum += landGray[y * width + x];
+    }
+    colAvg[x] = sum / stripH;
   }
   
-  // Find clusters of columns with significant vertical extent
-  // The skier = columns that extend significantly above waterline
-  const minVertExtent = Math.floor(height * 0.015); // at least 1.5% of frame height
+  // For each column: compute deviation from LOCAL neighbors (±20 columns)
+  const neighborRadius = 20;
+  const deviation = new Array(width).fill(0);
+  for (let x = neighborRadius; x < width - neighborRadius; x++) {
+    // Local average (excluding the column itself and close neighbors)
+    let localSum = 0, localCount = 0;
+    for (let dx = -neighborRadius; dx <= neighborRadius; dx++) {
+      if (Math.abs(dx) < 5) continue; // skip close neighbors
+      localSum += colAvg[x + dx];
+      localCount++;
+    }
+    const localAvg = localSum / localCount;
+    deviation[x] = Math.abs(colAvg[x] - localAvg);
+  }
+  
+  // Smooth deviation
+  const smoothDev = new Array(width).fill(0);
+  for (let x = 3; x < width - 3; x++) {
+    let sum = 0;
+    for (let dx = -3; dx <= 3; dx++) sum += deviation[x + dx];
+    smoothDev[x] = sum / 7;
+  }
+  
+  // Scan from ramp edge outward, find clusters of deviating columns
+  const scanStart = rampIsRight ? rampEdge - 10 : rampEdge + 10;
+  const scanEnd = rampIsRight ? 0 : width;
+  const scanDir = rampIsRight ? -1 : 1;
+  
+  // Find threshold: median deviation in the scan zone (= water baseline)
+  const waterDevs = [];
+  for (let x = scanStart; x !== scanEnd; x += scanDir) {
+    if (x < neighborRadius || x >= width - neighborRadius) continue;
+    waterDevs.push(smoothDev[x]);
+  }
+  waterDevs.sort((a, b) => a - b);
+  const medianDev = waterDevs[Math.floor(waterDevs.length * 0.5)] || 1;
+  const devThreshold = Math.max(medianDev * 3, 2); // 3x median or minimum 2
+  
+  // Find clusters of deviating columns
   const skierClusters = [];
   cStart = -1;
-  for (let x = searchXStart; x < searchXEnd; x++) {
-    if (smoothVert[x] > minVertExtent) {
-      if (cStart === -1) cStart = x;
+  for (let x = scanStart; x !== scanEnd; x += scanDir) {
+    if (x < neighborRadius || x >= width - neighborRadius) continue;
+    const xIdx = rampIsRight ? x : x; // actual x position
+    if (smoothDev[xIdx] > devThreshold) {
+      if (cStart === -1) cStart = xIdx;
     } else {
       if (cStart !== -1) {
-        const w = x - cStart;
-        if (w >= 5 && w <= 150) { // Skier is narrow (~10-80px wide)
-          const cx = Math.round((cStart + x - 1) / 2);
+        const s = Math.min(cStart, xIdx);
+        const e = Math.max(cStart, xIdx) - 1;
+        const w = e - s + 1;
+        if (w >= 3 && w <= 150) {
+          const cx = Math.round((s + e) / 2);
           const distToPred = Math.abs(cx - predX);
-          // Find max vertical extent in this cluster
-          let maxVE = 0;
-          for (let xx = cStart; xx < x; xx++) {
-            if (smoothVert[xx] > maxVE) maxVE = smoothVert[xx];
-          }
-          skierClusters.push({ start: cStart, end: x - 1, width: w, cx, distToPred, maxVE });
+          skierClusters.push({ start: s, end: e, width: w, cx, distToPred });
         }
         cStart = -1;
       }
     }
   }
   
-  console.log('[AI] Vertical profile: waterlineY:', rampWaterY, 'minExtent:', minVertExtent,
+  console.log('[AI] Column deviation: rampEdge:', rampEdge, 'stripTop:', stripTop, 
+    'stripBot:', stripBot, 'medianDev:', medianDev.toFixed(1), 'threshold:', devThreshold.toFixed(1),
     'predX:', predX, 'clusters:', skierClusters.map(c => 
-      `[${c.start}-${c.end}](w=${c.width},cx=${c.cx},ve=${Math.round(c.maxVE)},dist=${c.distToPred})`).join(' '));
+      `[${c.start}-${c.end}](w=${c.width},cx=${c.cx},dist=${c.distToPred})`).join(' '));
   
   if (skierClusters.length > 0) {
     // Pick the cluster closest to the predicted position from flight
@@ -446,22 +479,16 @@ export async function analyzeJump(frames, onProgress = () => {}) {
     
     landingX = skierCluster.cx;
     
-    // Build blobBox for visualization
-    let topY = rampWaterY;
-    for (let xx = skierCluster.start; xx <= skierCluster.end; xx++) {
-      const extent = verticalExtent[xx];
-      if (rampWaterY - extent < topY) topY = rampWaterY - extent;
-    }
     blobBox = {
       x: skierCluster.start / width,
-      y: topY / height,
+      y: stripTop / height,
       w: skierCluster.width / width,
-      h: (rampWaterY - topY + 20) / height
+      h: (stripBot - stripTop + 20) / height
     };
     
     console.log('[AI] Skier found: x=', landingX, 
       'cluster:', skierCluster.start, '-', skierCluster.end,
-      'width:', skierCluster.width, 'vertExtent:', Math.round(skierCluster.maxVE));
+      'width:', skierCluster.width);
   }
   
   // Fallback
