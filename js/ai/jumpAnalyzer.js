@@ -403,7 +403,7 @@ export async function analyzeJump(frames, onProgress = () => {}) {
   // The skier = columns that extend significantly above waterline
   const minVertExtent = Math.floor(height * 0.03); // at least 3% of frame height
   const skierClusters = [];
-  let cStart = -1;
+  cStart = -1;
   for (let x = searchXStart; x < searchXEnd; x++) {
     if (smoothVert[x] > minVertExtent) {
       if (cStart === -1) cStart = x;
