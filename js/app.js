@@ -292,11 +292,13 @@ if (aiDetectBtn) {
           frameWidth: state.frames[0].width,
           frameHeight: state.frames[0].height,
           rampMarker: result.rampMarker || null,
+          blobBox: result.blobBox || null,
         };
 
         // Set the measurement line to the detected landing point
         state.lineX = result.landingX;
         state.rampMarker = result.rampMarker || null;
+        state.blobBox = result.blobBox || null;
         
         // Navigate to the landing frame
         if (result.landingFrameIndex !== null) {

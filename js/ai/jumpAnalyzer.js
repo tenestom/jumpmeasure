@@ -345,83 +345,22 @@ export async function analyzeJump(frames, onProgress = () => {}) {
     }
   }
   
-  // STEP 2: FIND SKIER at ramp's Y level using frame difference
-  // The skier lands at the same Y level as the ramp base.
-  // Compare landing frame with a reference 5 frames earlier.
-  // The closest motion to the ramp = the skier (boat is further away).
-  if (rampNativeX !== null && rampNativeY !== null) {
-    const refIdx = Math.max(0, landingFrame - 5);
-    const landGray = toGrayscale(frames[landingFrame]);
-    const refGray = toGrayscale(frames[refIdx]);
-    
-    // Search band: ramp Y ± tolerance
-    const yTol = Math.floor(height * 0.05);
-    const searchY1 = Math.max(0, rampNativeY - yTol);
-    const searchY2 = Math.min(height - 1, rampNativeY + yTol);
-    
-    // Column profile of motion at ramp Y level
-    const motionProfile = new Array(width).fill(0);
-    for (let x = 0; x < width; x++) {
-      for (let y = searchY1; y <= searchY2; y++) {
-        const idx = y * width + x;
-        const diff = Math.abs(landGray[idx] - refGray[idx]);
-        if (diff > 25) motionProfile[x]++;
-      }
-    }
-    
-    // Exclude the ramp zone itself (ramp doesn't move, but edge artifacts)
-    const rampExcludeStart = rampNativeX - 50;
-    const rampExcludeEnd = rampNativeX + 200;
-    for (let x = Math.max(0, rampExcludeStart); x < Math.min(width, rampExcludeEnd); x++) {
-      motionProfile[x] = 0;
-    }
-    
-    // Find motion clusters
-    // Smooth motion profile
-    const smoothMotion = new Array(width).fill(0);
-    for (let x = 5; x < width - 5; x++) {
-      let sum = 0;
-      for (let dx = -5; dx <= 5; dx++) sum += motionProfile[x + dx];
-      smoothMotion[x] = sum;
-    }
-    
-    // Find LOCAL PEAKS in the smoothed motion profile
-    // The skier and boat both create peaks, but skier's peak is closest to ramp
-    const peaks = [];
-    for (let x = 10; x < width - 10; x++) {
-      if (smoothMotion[x] > smoothMotion[x - 5] && 
-          smoothMotion[x] > smoothMotion[x + 5] &&
-          smoothMotion[x] > 20) { // minimum peak height
-        // Check if this is a real local max (not just a plateau)
-        let isPeak = true;
-        for (const p of peaks) {
-          if (Math.abs(p.x - x) < 30) { // too close to another peak
-            if (smoothMotion[x] > p.val) {
-              peaks.splice(peaks.indexOf(p), 1); // replace with stronger
-            } else {
-              isPeak = false;
-            }
-            break;
-          }
-        }
-        if (isPeak) {
-          peaks.push({ x, val: smoothMotion[x], distToRamp: Math.abs(x - rampNativeX) });
-        }
-      }
-    }
-    
-    console.log('[AI] Motion peaks:', peaks.map(p => 
-      `x=${p.x}(val=${p.val},dist=${p.distToRamp})`).join(' '));
-    
-    if (peaks.length > 0) {
-      // Skier = the peak CLOSEST to the ramp
-      const skierPeak = peaks.reduce((a, b) => 
-        a.distToRamp < b.distToRamp ? a : b);
-      
-      landingX = skierPeak.x;
-      console.log('[AI] Skier peak: x=', landingX, 
-        'dist to ramp:', skierPeak.distToRamp, 'val:', skierPeak.val);
-    }
+  // STEP 2: USE BLOB TRACKER'S POSITION AT LANDING FRAME
+  // The blob tracker already found the skier throughout the video.
+  // At the landing frame, the blob's cx = the skier's X position.
+  const landingBlob = trackingData[landingFrame];
+  let blobBox = null;
+  if (landingBlob && landingBlob.detected) {
+    landingX = landingBlob.cx;
+    blobBox = {
+      x: landingBlob.bbox.x / width,
+      y: landingBlob.bbox.y / height,
+      w: landingBlob.bbox.w / width,
+      h: landingBlob.bbox.h / height
+    };
+    console.log('[AI] Skier from blob tracker: x=', landingX, 
+      'cx=', landingBlob.cx, 'cy=', landingBlob.cy,
+      'bbox:', JSON.stringify(landingBlob.bbox));
   }
   
   // Fallback
@@ -474,6 +413,7 @@ export async function analyzeJump(frames, onProgress = () => {}) {
     peakFrame: peakFrame.frame,
     initialContact: initialContactFrame,
     rampMarker: rampIsRight !== null ? { x: rampMarkerX, y: rampMarkerY } : null,
+    blobBox,
   };
 }
 

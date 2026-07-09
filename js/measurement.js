@@ -88,6 +88,22 @@ export function drawLine(ox, oy, vw, vh) {
     ctx.font = '11px sans-serif';
     ctx.fillText('RAMP', rpx + 14, rpy + 4);
   }
+  
+  // Debug: draw blob bounding box as red rectangle
+  if (state.blobBox) {
+    const bx = ox + state.blobBox.x * vw;
+    const by = oy + state.blobBox.y * vh;
+    const bw = state.blobBox.w * vw;
+    const bh = state.blobBox.h * vh;
+    ctx.beginPath();
+    ctx.rect(bx, by, bw, bh);
+    ctx.strokeStyle = 'rgba(255, 0, 0, 0.9)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+    ctx.font = '11px sans-serif';
+    ctx.fillText('BLOB', bx, by - 4);
+  }
 }
 
 export function drawCalibrationPoints(ox, oy) {
