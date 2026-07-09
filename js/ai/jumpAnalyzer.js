@@ -205,138 +205,116 @@ export async function analyzeJump(frames, onProgress = () => {}) {
   console.log('[AI] initialContactFrame:', initialContactFrame, 'peakFrame:', peakFrame.frame);
   console.log('[AI] Landing frame (contact+7):', landingFrame);
   
-  // SKIER DETECTION: Find the skier directly in the landing frame.
-  // Key insight: skier is VERTICAL (tall, narrow), boat is HORIZONTAL (wide, short).
-  // For each column, compute the VERTICAL EXTENT of changed pixels.
-  // Columns with tall changes = skier. Short changes = boat/noise.
+  // STEP 1: DETECT THE RAMP
+  // The ramp is a triangular structure on either the LEFT or RIGHT side of the frame.
+  // Compare structure variance of left 15% vs right 15% — the side with the ramp
+  // has more visual structure (the ramp triangle).
+  const leftEdgeVar = computeEdgeVariance(bgGray, width, height, 0, Math.floor(width * 0.15), 0, height);
+  const rightEdgeVar = computeEdgeVariance(bgGray, width, height, Math.floor(width * 0.85), width, 0, height);
   
-  const refFrame = Math.max(0, landingFrame - 15); // 15 frames back for larger displacement
-  const landingGray = toGrayscale(frames[landingFrame]);
-  const refGray = toGrayscale(frames[refFrame]);
+  const rampIsRight = rightEdgeVar > leftEdgeVar;
   
-  // Search zone: y=15-60% of height (skier above and at waterline)
-  const skierY1 = Math.floor(height * 0.15);
-  const skierY2 = Math.floor(height * 0.60);
+  console.log('[AI] Ramp detection: leftVar:', Math.round(leftEdgeVar), 
+    'rightVar:', Math.round(rightEdgeVar), '→ ramp is', rampIsRight ? 'RIGHT' : 'LEFT');
   
-  // For each column: find the vertical extent of significantly changed pixels
-  const vertExtent = new Array(width).fill(0);
-  const vertCount = new Array(width).fill(0);
-  const vertMaxY = new Array(width).fill(0);
+  // STEP 2: SPLASH-BASED X DETECTION
+  // Analyze a later frame where the splash/wake is fully visible
+  const splashFrame = Math.min(safeContactFrame + 23, totalFrames - 1);
+  const splashGray = toGrayscale(frames[splashFrame]);
+  const preSplashGray = toGrayscale(frames[Math.max(0, splashFrame - 4)]);
   
-  // Waterline Y = same level as the ramp (peakFrame.cy)
-  const rampY = peakFrame.cy;
-  const rampX = peakFrame.cx;
-  const waterlineTolerance = 50;
+  // Waterline zone
+  const splashRy1 = Math.floor(height * 0.35);
+  const splashRy2 = Math.floor(height * 0.48);
   
-  console.log('[AI] Ramp position: x=', Math.round(rampX), 'y=', Math.round(rampY),
-    'refFrame:', refFrame, 'landingFrame:', landingFrame);
+  // Column profile: bright new pixels at waterline
+  const colProfile = new Array(width).fill(0);
+  let totalNewPixels = 0;
   
-  for (let x = 0; x < width; x++) {
-    let minY = skierY2, maxY = skierY1;
-    let count = 0;
-    for (let y = skierY1; y < skierY2; y++) {
+  for (let y = splashRy1; y < splashRy2; y++) {
+    for (let x = 0; x < width; x++) {
       const idx = y * width + x;
-      const diff = Math.abs(landingGray[idx] - refGray[idx]);
-      if (diff > 20) { // Lower threshold: dark skier on dark bg
-        if (y < minY) minY = y;
-        if (y > maxY) maxY = y;
-        count++;
+      const vsPreSplash = splashGray[idx] - preSplashGray[idx];
+      const vsBg = splashGray[idx] - bgGray[idx];
+      if (vsPreSplash > 30 && vsBg > 30 && splashGray[idx] > 180) {
+        colProfile[x]++;
+        totalNewPixels++;
       }
     }
-    vertMaxY[x] = maxY;
-    if (maxY > (rampY - waterlineTolerance) && maxY > minY) {
-      vertExtent[x] = maxY - minY;
-    } else {
-      vertExtent[x] = 0;
-    }
-    vertCount[x] = count;
   }
   
-  // Log raw vertExtent around the ramp area for diagnostics
-  const diagStart = Math.max(0, Math.round(rampX) - 300);
-  const diagEnd = Math.min(width - 1, Math.round(rampX) + 300);
-  const diagSamples = [];
-  for (let x = diagStart; x <= diagEnd; x += 10) {
-    if (vertExtent[x] > 0) {
-      diagSamples.push(`x${x}:v=${vertExtent[x]},maxY=${vertMaxY[x]},cnt=${vertCount[x]}`);
-    }
-  }
-  console.log('[AI] VertExtent near ramp:', diagSamples.join(' | '));
+  console.log('[AI] X: splashFrame:', splashFrame, 'totalNewPixels:', totalNewPixels);
   
-  // Smooth vertical extent with 5px window
-  const smoothVert = new Array(width).fill(0);
-  for (let x = 3; x < width - 3; x++) {
-    let sum = 0;
-    for (let dx = -3; dx <= 3; dx++) sum += vertExtent[x + dx];
-    smoothVert[x] = sum / 7;
-  }
-  
-  // Lower threshold: 30px vertical extent minimum
-  const vertThreshold = 30;
-  
-  // Find clusters of tall-change columns
-  const skierClusters = [];
-  let cStart = -1;
-  for (let x = 0; x < width; x++) {
-    if (smoothVert[x] > vertThreshold) {
-      if (cStart === -1) cStart = x;
-    } else {
-      if (cStart !== -1) {
-        const cWidth = x - cStart;
-        if (cWidth >= 5 && cWidth <= 120) { // Wider range
-          let mass = 0, weightedX = 0, avgVert = 0;
-          for (let cx = cStart; cx < x; cx++) {
-            mass += vertExtent[cx];
-            weightedX += cx * vertExtent[cx];
-            avgVert += vertExtent[cx];
-          }
-          avgVert /= cWidth;
-          const centroid = Math.round(weightedX / mass);
-          const aspectRatio = avgVert / cWidth;
-          skierClusters.push({ start: cStart, end: x - 1, width: cWidth, mass, centroid, avgVert: Math.round(avgVert), aspectRatio: aspectRatio.toFixed(1) });
+  if (totalNewPixels > 5) {
+    // Find clusters
+    const clusters = [];
+    let cStart = -1;
+    for (let x = 0; x < width; x++) {
+      if (colProfile[x] > 0) {
+        if (cStart === -1) cStart = x;
+      } else {
+        if (cStart !== -1) {
+          let mass = 0;
+          for (let cx = cStart; cx <= x - 1; cx++) mass += colProfile[cx];
+          clusters.push({ start: cStart, end: x - 1, width: x - cStart, mass });
+          cStart = -1;
         }
-        cStart = -1;
       }
     }
-  }
-  if (cStart !== -1) {
-    const cWidth = width - cStart;
-    if (cWidth >= 5 && cWidth <= 120) {
-      let mass = 0, weightedX = 0, avgVert = 0;
-      for (let cx = cStart; cx < width; cx++) {
-        mass += vertExtent[cx];
-        weightedX += cx * vertExtent[cx];
-        avgVert += vertExtent[cx];
-      }
-      avgVert /= cWidth;
-      const centroid = Math.round(weightedX / mass);
-      const aspectRatio = avgVert / cWidth;
-      skierClusters.push({ start: cStart, end: width - 1, width: cWidth, mass, centroid, avgVert: Math.round(avgVert), aspectRatio: aspectRatio.toFixed(1) });
+    if (cStart !== -1) {
+      let mass = 0;
+      for (let cx = cStart; cx < width; cx++) mass += colProfile[cx];
+      clusters.push({ start: cStart, end: width - 1, width: width - cStart, mass });
     }
-  }
-  
-  const rampRadius = 400;
-  
-  console.log('[AI] Skier detection: vertThreshold:', vertThreshold,
-    'rampX:', Math.round(rampX), 'range:', Math.round(rampX - rampRadius), '-', Math.round(rampX + rampRadius));
-  console.log('[AI] All clusters:', skierClusters.map(c => 
-    `[${c.start}-${c.end}](w=${c.width},h=${c.avgVert},ar=${c.aspectRatio},cx=${c.centroid})`).join(' '));
-  
-  // Filter: must be near the ramp
-  const nearRampClusters = skierClusters.filter(c => 
-    Math.abs(c.centroid - rampX) < rampRadius
-  );
-  
-  console.log('[AI] Near-ramp clusters:', nearRampClusters.map(c => 
-    `[${c.start}-${c.end}](w=${c.width},h=${c.avgVert},ar=${c.aspectRatio},cx=${c.centroid})`).join(' '));
-  
-  if (nearRampClusters.length > 0) {
-    const skierCluster = nearRampClusters.reduce((a, b) => 
-      parseFloat(a.aspectRatio) > parseFloat(b.aspectRatio) ? a : b);
-    landingX = skierCluster.centroid;
-    console.log('[AI] Skier found (most vertical near ramp): centroid =', landingX, 
-      'width:', skierCluster.width, 'height:', skierCluster.avgVert, 
-      'aspectRatio:', skierCluster.aspectRatio);
+    
+    console.log('[AI] X: clusters:', clusters.map(c => 
+      `[${c.start}-${c.end}](w=${c.width},m=${c.mass})`).join(' '));
+    
+    // Main wake = largest cluster by mass
+    const mainWake = clusters.reduce((a, b) => a.mass > b.mass ? a : b);
+    
+    console.log('[AI] X: mainWake [', mainWake.start, '-', mainWake.end, '] mass:', mainWake.mass);
+    
+    // Smooth the profile within the main wake
+    const smoothed = new Array(width).fill(0);
+    for (let x = mainWake.start + 5; x <= mainWake.end - 5; x++) {
+      let sum = 0;
+      for (let dx = -5; dx <= 5; dx++) sum += colProfile[x + dx];
+      smoothed[x] = sum;
+    }
+    
+    // Find peak value for threshold
+    let peakVal = 0;
+    for (let x = mainWake.start; x <= mainWake.end; x++) {
+      if (smoothed[x] > peakVal) peakVal = smoothed[x];
+    }
+    
+    const threshold = peakVal * 0.3;
+    
+    console.log('[AI] X: rampSide:', rampIsRight ? 'right' : 'left',
+      'peak:', peakVal, 'threshold:', Math.round(threshold));
+    
+    // Scan from ramp side inward — first column above threshold = landing contact
+    if (rampIsRight) {
+      for (let x = mainWake.end; x >= mainWake.start; x--) {
+        if (smoothed[x] > threshold) {
+          landingX = x;
+          break;
+        }
+      }
+    } else {
+      for (let x = mainWake.start; x <= mainWake.end; x++) {
+        if (smoothed[x] > threshold) {
+          landingX = x;
+          break;
+        }
+      }
+    }
+    
+    if (landingX !== null) {
+      console.log('[AI] X: landing at native', landingX, 
+        'normalized:', (landingX / width).toFixed(4));
+    }
   }
   
   // Fallback
@@ -388,12 +366,31 @@ export async function analyzeJump(frames, onProgress = () => {}) {
     trajectory,
     peakFrame: peakFrame.frame,
     initialContact: initialContactFrame,
-    rampMarker: { x: rampX / width, y: rampY / height }, // Debug: ramp position
+    rampMarker: { x: rampIsRight ? 0.92 : 0.08, y: 0.3, side: rampIsRight ? 'right' : 'left' },
   };
 }
 
 
 // --- Helper functions ---
+
+/**
+ * Compute pixel variance in a rectangular region of a grayscale image.
+ * Higher variance = more visual structure (ramp, objects vs plain water/sky).
+ */
+function computeEdgeVariance(gray, imgWidth, imgHeight, x1, x2, y1, y2) {
+  let sum = 0, sumSq = 0, count = 0;
+  for (let y = y1; y < y2; y++) {
+    for (let x = x1; x < x2; x++) {
+      const val = gray[y * imgWidth + x];
+      sum += val;
+      sumSq += val * val;
+      count++;
+    }
+  }
+  if (count === 0) return 0;
+  const mean = sum / count;
+  return (sumSq / count) - (mean * mean);
+}
 
 /**
  * Convert ImageData to grayscale Float32Array.
