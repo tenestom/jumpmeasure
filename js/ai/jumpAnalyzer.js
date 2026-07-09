@@ -211,6 +211,7 @@ export async function analyzeJump(frames, onProgress = () => {}) {
   let rampMarkerX = 0, rampMarkerY = 0;
   let rampNativeX = null, rampNativeY = null, rampNativeTopY = null;
   let rampNativeStartX = null, rampNativeEndX = null;
+  let rampFullWidth = 200; // default: exclude 200px from ramp edge
   
   // First determine ramp side from splash data
   const splashFrame = Math.min(safeContactFrame + 23, totalFrames - 1);
@@ -359,9 +360,17 @@ export async function analyzeJump(frames, onProgress = () => {}) {
       rampNativeStartX = rampCluster.start;
       rampNativeEndX = rampCluster.end;
       
+      // Full ramp extent: from outermost cluster to innermost
+      // This gives us the total ramp width for exclusion zone
+      const outerEdge = rampIsRight
+        ? edgeClusters.reduce((a, b) => a.start < b.start ? a : b).start  // leftmost = outer edge for right ramp
+        : edgeClusters.reduce((a, b) => a.end > b.end ? a : b).end;       // rightmost = outer edge for left ramp
+      rampFullWidth = Math.abs(rampCluster.cx - outerEdge);
+      
       console.log('[AI] Ramp located: x=', rampCluster.cx, 
         'topY=', rampTopY, 'baseY=', rampBaseY, 'height=', rampBaseY - rampTopY,
-        'cluster:', rampCluster.start, '-', rampCluster.end);
+        'cluster:', rampCluster.start, '-', rampCluster.end,
+        'fullWidth:', rampFullWidth);
     }
   }
   
@@ -490,9 +499,9 @@ export async function analyzeJump(frames, onProgress = () => {}) {
       `[${c.start}-${c.end}](w=${c.width},cx=${c.cx},dist=${c.distToPred})`).join(' '));
   
   if (skierClusters.length > 0) {
-    // Exclude clusters that are within the ramp zone (too close to ramp)
+    // Exclude everything within one full ramp-width from the ramp edge
     const rampExcludeX = rampIsRight ? rampEdge : (rampNativeEndX || Math.floor(width * 0.3));
-    const rampExcludeMargin = 80; // px buffer around ramp
+    const rampExcludeMargin = rampFullWidth; // at least one ramp-width away
     const validClusters = skierClusters.filter(c => 
       rampIsRight ? c.cx < rampExcludeX - rampExcludeMargin
                   : c.cx > rampExcludeX + rampExcludeMargin
