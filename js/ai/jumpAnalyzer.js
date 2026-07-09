@@ -276,55 +276,97 @@ export async function analyzeJump(frames, onProgress = () => {}) {
   }
 
   // Step 7: Find the precise X position of the mound
-  // Strategy: Compare the landing frame to a PRE-MOUND frame (a few frames earlier).
-  // The difference shows ONLY the new mound — no static features, no wake trail.
+  // The mound is a small ISOLATED bright feature. The wake trail is a broad band.
+  // Strategy: 
+  // 1. Triple filter: pixel must be brighter vs BOTH pre-mound AND background (strict)
+  // 2. Build column profile of passing pixels
+  // 3. Find the most ISOLATED bright cluster (farthest from the main wake mass)
   if (landingFrame !== null) {
-    // Use a frame 3-5 frames before landing as "pre-mound" reference
     const preMoundIdx = Math.max(0, landingFrame - 4);
     const landingGray = toGrayscale(frames[landingFrame]);
     const preMoundGray = toGrayscale(frames[preMoundIdx]);
     
-    // Find pixels that are significantly BRIGHTER in landing vs pre-mound
-    let sumX = 0, sumW = 0;
-    const newBrightPixels = [];
+    // Build per-column count of truly NEW bright pixels (triple filter)
+    const colProfile = new Array(width).fill(0);
+    let totalNewPixels = 0;
     
     for (let y = ry1; y < ry2; y++) {
       for (let x = rx1; x < rx2; x++) {
         const idx = y * width + x;
-        const diff = landingGray[idx] - preMoundGray[idx];
-        // Pixel must be getting brighter (new splash) AND be bright
-        if (diff > 15 && landingGray[idx] > 140) {
-          const weight = diff;
-          sumX += x * weight;
-          sumW += weight;
-          newBrightPixels.push(x);
+        const vsPreMound = landingGray[idx] - preMoundGray[idx];
+        const vsBg = landingGray[idx] - bgGray[idx];
+        // Must be brighter than BOTH pre-mound AND background, and bright overall
+        if (vsPreMound > 30 && vsBg > 30 && landingGray[idx] > 180) {
+          colProfile[x]++;
+          totalNewPixels++;
         }
       }
     }
     
-    if (sumW > 0) {
-      landingX = sumX / sumW;
-      const minPx = Math.min(...newBrightPixels);
-      const maxPx = Math.max(...newBrightPixels);
-      console.log('[AI] X: frame-diff centroid:', Math.round(landingX), 
-        'range:', minPx, '-', maxPx, 'pixels:', newBrightPixels.length,
-        'preMound:', preMoundIdx);
-    } else {
-      // Fallback: centroid of all disturbed pixels vs background
+    console.log('[AI] X: totalNewPixels (triple filter):', totalNewPixels);
+    
+    if (totalNewPixels > 5) {
+      // Find all clusters of bright columns (groups of consecutive cols with count > 0)
+      const clusters = [];
+      let cStart = -1;
+      for (let x = 0; x < width; x++) {
+        if (colProfile[x] > 0) {
+          if (cStart === -1) cStart = x;
+        } else {
+          if (cStart !== -1) {
+            const cEnd = x - 1;
+            let mass = 0;
+            let sumCx = 0;
+            for (let cx = cStart; cx <= cEnd; cx++) {
+              mass += colProfile[cx];
+              sumCx += cx * colProfile[cx];
+            }
+            clusters.push({ start: cStart, end: cEnd, width: cEnd - cStart + 1, mass, centroid: sumCx / mass });
+            cStart = -1;
+          }
+        }
+      }
+      // Handle cluster at edge
+      if (cStart !== -1) {
+        const cEnd = width - 1;
+        let mass = 0, sumCx = 0;
+        for (let cx = cStart; cx <= cEnd; cx++) { mass += colProfile[cx]; sumCx += cx * colProfile[cx]; }
+        clusters.push({ start: cStart, end: cEnd, width: cEnd - cStart + 1, mass, centroid: sumCx / mass });
+      }
+      
+      console.log('[AI] X: found', clusters.length, 'clusters:', 
+        clusters.map(c => `[${c.start}-${c.end}](w=${c.width},m=${c.mass})`).join(' '));
+      
+      if (clusters.length === 1) {
+        // Only one cluster — that's our mound
+        landingX = clusters[0].centroid;
+      } else if (clusters.length > 1) {
+        // Multiple clusters: the mound is the SMALLEST/most isolated one
+        // Sort by mass (smallest first) — the mound is small
+        clusters.sort((a, b) => a.mass - b.mass);
+        // Pick the smallest cluster that has at least 2 pixels
+        const mound = clusters.find(c => c.mass >= 2) || clusters[0];
+        landingX = mound.centroid;
+        console.log('[AI] X: picked smallest cluster:', mound.start, '-', mound.end, 'mass:', mound.mass);
+      }
+    }
+    
+    if (landingX === null) {
+      // Fallback: weighted centroid of bg-diff
       let sx = 0, sw = 0;
+      const landingGrayFb = toGrayscale(frames[landingFrame]);
       for (let y = ry1; y < ry2; y++) {
         for (let x = rx1; x < rx2; x++) {
           const idx = y * width + x;
-          const bgDiff = Math.abs(landingGray[idx] - bgGray[idx]);
-          if (bgDiff > 25 && landingGray[idx] > 150) {
-            sx += x * bgDiff;
-            sw += bgDiff;
-          }
+          const bgDiff = Math.abs(landingGrayFb[idx] - bgGray[idx]);
+          if (bgDiff > 40 && landingGrayFb[idx] > 170) { sx += x * bgDiff; sw += bgDiff; }
         }
       }
       landingX = sw > 0 ? sx / sw : width / 2;
       console.log('[AI] X: fallback bg-diff centroid:', Math.round(landingX));
     }
+    
+    console.log('[AI] X: final landingX:', Math.round(landingX));
   }
 
   // Normalize landing X to 0..1
