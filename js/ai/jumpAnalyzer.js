@@ -302,17 +302,30 @@ export async function analyzeJump(frames, onProgress = () => {}) {
     }
   }
   
+  // Ramp position estimate: peakFrame.cx is likely the ramp (blob tracker was stationary there)
+  const rampX = peakFrame.cx;
+  const rampRadius = 400; // Skier lands within 400px of ramp
+  
   console.log('[AI] Skier detection in frame', landingFrame, 
-    '(ref:', refFrame, ') vertThreshold:', vertThreshold);
-  console.log('[AI] Skier clusters:', skierClusters.map(c => 
+    '(ref:', refFrame, ') vertThreshold:', vertThreshold,
+    'rampX:', Math.round(rampX), 'searchRange:', Math.round(rampX - rampRadius), '-', Math.round(rampX + rampRadius));
+  console.log('[AI] All clusters:', skierClusters.map(c => 
     `[${c.start}-${c.end}](w=${c.width},h=${c.avgVert},ar=${c.aspectRatio},cx=${c.centroid})`).join(' '));
   
-  if (skierClusters.length > 0) {
+  // Filter: must be near the ramp
+  const nearRampClusters = skierClusters.filter(c => 
+    Math.abs(c.centroid - rampX) < rampRadius
+  );
+  
+  console.log('[AI] Near-ramp clusters:', nearRampClusters.map(c => 
+    `[${c.start}-${c.end}](w=${c.width},h=${c.avgVert},ar=${c.aspectRatio},cx=${c.centroid})`).join(' '));
+  
+  if (nearRampClusters.length > 0) {
     // Pick the cluster with the highest aspect ratio (most vertical) = the skier
-    const skierCluster = skierClusters.reduce((a, b) => 
+    const skierCluster = nearRampClusters.reduce((a, b) => 
       parseFloat(a.aspectRatio) > parseFloat(b.aspectRatio) ? a : b);
     landingX = skierCluster.centroid;
-    console.log('[AI] Skier found (most vertical): centroid =', landingX, 
+    console.log('[AI] Skier found (most vertical near ramp): centroid =', landingX, 
       'width:', skierCluster.width, 'height:', skierCluster.avgVert, 
       'aspectRatio:', skierCluster.aspectRatio);
   }
