@@ -206,60 +206,71 @@ export async function analyzeJump(frames, onProgress = () => {}) {
   console.log('[AI] Landing frame (contact+7):', landingFrame);
   
   // SKIER DETECTION: Find the skier directly in the landing frame.
-  // Compare landing frame to a reference frame (5 frames before) to find what MOVED.
-  // The skier is a compact dark object that moved into the waterline zone.
+  // Key insight: skier is VERTICAL (tall, narrow), boat is HORIZONTAL (wide, short).
+  // For each column, compute the VERTICAL EXTENT of changed pixels.
+  // Columns with tall changes = skier. Short changes = boat/noise.
   
   const refFrame = Math.max(0, landingFrame - 5);
   const landingGray = toGrayscale(frames[landingFrame]);
   const refGray = toGrayscale(frames[refFrame]);
   
-  // Search zone: around the waterline where skis touch (y=20-55% of height)
-  const skierY1 = Math.floor(height * 0.20);
-  const skierY2 = Math.floor(height * 0.55);
+  // Search zone: y=15-60% of height (skier above and at waterline)
+  const skierY1 = Math.floor(height * 0.15);
+  const skierY2 = Math.floor(height * 0.60);
   
-  // Build column difference profile: |landingFrame - refFrame|
-  // High threshold to ignore camera shake (shake causes small diffs, skier causes large)
-  const diffProfile = new Array(width).fill(0);
+  // For each column: find the vertical extent of significantly changed pixels
+  const vertExtent = new Array(width).fill(0);
+  const vertCount = new Array(width).fill(0);
   
   for (let x = 0; x < width; x++) {
-    let diffSum = 0;
+    let minY = skierY2, maxY = skierY1;
+    let count = 0;
     for (let y = skierY1; y < skierY2; y++) {
       const idx = y * width + x;
       const diff = Math.abs(landingGray[idx] - refGray[idx]);
-      if (diff > 40) diffSum += diff; // High threshold: only strong changes
+      if (diff > 40) {
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+        count++;
+      }
     }
-    diffProfile[x] = diffSum;
+    vertExtent[x] = maxY > minY ? (maxY - minY) : 0;
+    vertCount[x] = count;
   }
   
-  // Smooth with 10px window
-  const smoothDiff = new Array(width).fill(0);
-  for (let x = 5; x < width - 5; x++) {
+  // Smooth vertical extent with 5px window
+  const smoothVert = new Array(width).fill(0);
+  for (let x = 3; x < width - 3; x++) {
     let sum = 0;
-    for (let dx = -5; dx <= 5; dx++) sum += diffProfile[x + dx];
-    smoothDiff[x] = sum;
+    for (let dx = -3; dx <= 3; dx++) sum += vertExtent[x + dx];
+    smoothVert[x] = sum / 7;
   }
   
-  // Find clusters of significant change (potential skier regions)
-  const diffMedian = [...smoothDiff].sort((a, b) => a - b)[Math.floor(width * 0.5)];
-  const diffThreshold = Math.max(diffMedian * 3, 500);
+  // Threshold: columns with tall changes (>60px vertical extent) = potential skier
+  const vertThreshold = 60;
   
+  // Find clusters of tall-change columns
   const skierClusters = [];
   let cStart = -1;
   for (let x = 0; x < width; x++) {
-    if (smoothDiff[x] > diffThreshold) {
+    if (smoothVert[x] > vertThreshold) {
       if (cStart === -1) cStart = x;
     } else {
       if (cStart !== -1) {
         const cWidth = x - cStart;
-        // Skier is compact: 15-150px wide
-        if (cWidth >= 15 && cWidth <= 150) {
+        // Skier is narrow: 10-80px wide
+        if (cWidth >= 10 && cWidth <= 80) {
           let mass = 0, weightedX = 0;
+          let avgVert = 0;
           for (let cx = cStart; cx < x; cx++) {
-            mass += smoothDiff[cx];
-            weightedX += cx * smoothDiff[cx];
+            mass += vertExtent[cx];
+            weightedX += cx * vertExtent[cx];
+            avgVert += vertExtent[cx];
           }
+          avgVert /= cWidth;
           const centroid = Math.round(weightedX / mass);
-          skierClusters.push({ start: cStart, end: x - 1, width: cWidth, mass, centroid });
+          const aspectRatio = avgVert / cWidth; // High = vertical = skier
+          skierClusters.push({ start: cStart, end: x - 1, width: cWidth, mass, centroid, avgVert: Math.round(avgVert), aspectRatio: aspectRatio.toFixed(1) });
         }
         cStart = -1;
       }
@@ -267,28 +278,33 @@ export async function analyzeJump(frames, onProgress = () => {}) {
   }
   if (cStart !== -1) {
     const cWidth = width - cStart;
-    if (cWidth >= 15 && cWidth <= 150) {
-      let mass = 0, weightedX = 0;
+    if (cWidth >= 10 && cWidth <= 80) {
+      let mass = 0, weightedX = 0, avgVert = 0;
       for (let cx = cStart; cx < width; cx++) {
-        mass += smoothDiff[cx];
-        weightedX += cx * smoothDiff[cx];
+        mass += vertExtent[cx];
+        weightedX += cx * vertExtent[cx];
+        avgVert += vertExtent[cx];
       }
+      avgVert /= cWidth;
       const centroid = Math.round(weightedX / mass);
-      skierClusters.push({ start: cStart, end: width - 1, width: cWidth, mass, centroid });
+      const aspectRatio = avgVert / cWidth;
+      skierClusters.push({ start: cStart, end: width - 1, width: cWidth, mass, centroid, avgVert: Math.round(avgVert), aspectRatio: aspectRatio.toFixed(1) });
     }
   }
   
   console.log('[AI] Skier detection in frame', landingFrame, 
-    '(ref:', refFrame, ') diffThreshold:', Math.round(diffThreshold));
+    '(ref:', refFrame, ') vertThreshold:', vertThreshold);
   console.log('[AI] Skier clusters:', skierClusters.map(c => 
-    `[${c.start}-${c.end}](w=${c.width},m=${Math.round(c.mass)},cx=${c.centroid})`).join(' '));
+    `[${c.start}-${c.end}](w=${c.width},h=${c.avgVert},ar=${c.aspectRatio},cx=${c.centroid})`).join(' '));
   
   if (skierClusters.length > 0) {
-    // Pick the cluster with the highest mass = the skier
-    const skierCluster = skierClusters.reduce((a, b) => a.mass > b.mass ? a : b);
+    // Pick the cluster with the highest aspect ratio (most vertical) = the skier
+    const skierCluster = skierClusters.reduce((a, b) => 
+      parseFloat(a.aspectRatio) > parseFloat(b.aspectRatio) ? a : b);
     landingX = skierCluster.centroid;
-    console.log('[AI] Skier found: centroid =', landingX, 
-      'native, normalized:', (landingX / width).toFixed(4));
+    console.log('[AI] Skier found (most vertical): centroid =', landingX, 
+      'width:', skierCluster.width, 'height:', skierCluster.avgVert, 
+      'aspectRatio:', skierCluster.aspectRatio);
   }
   
   // Fallback
