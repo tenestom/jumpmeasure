@@ -276,9 +276,10 @@ export async function analyzeJump(frames, onProgress = () => {}) {
   }
 
   // Step 7: Find the precise X position of the mound
-  // The mound is at the BEGINNING of the skier's water disturbance.
-  // Strategy: Scan from each side of the frame. The transition from 
-  // calm water to disturbed water = the mound (landing point).
+  // The skier creates a TRAIL of disturbed water. The mound is at the 
+  // very BEGINNING of this trail (closest to the jump/ramp).
+  // Strategy: Find the LONGEST continuous disturbance (= skier's trail,
+  // not the boat). The mound is at one end — the end with the sharper peak.
   if (landingFrame !== null) {
     const landingGray = toGrayscale(frames[landingFrame]);
     
@@ -299,7 +300,7 @@ export async function analyzeJump(frames, onProgress = () => {}) {
       bgDiffProfile[x] = colSum;
     }
     
-    // Smooth with 15px window for stable edge detection
+    // Smooth with 15px window
     const smoothed = new Array(width).fill(0);
     for (let x = 7; x < width - 7; x++) {
       let sum = 0;
@@ -307,71 +308,72 @@ export async function analyzeJump(frames, onProgress = () => {}) {
       smoothed[x] = sum / 15;
     }
     
-    // Compute percentiles for threshold
+    // Threshold: use percentile
     const sorted = [...smoothed].filter(v => v > 0).sort((a, b) => a - b);
-    const p25 = sorted[Math.floor(sorted.length * 0.25)] || 0;
-    const p75 = sorted[Math.floor(sorted.length * 0.75)] || 0;
-    // Threshold: midpoint between quiet and active regions
-    const edgeThreshold = (p25 + p75) / 2;
+    const edgeThreshold = sorted[Math.floor(sorted.length * 0.5)] || 50;
     
-    console.log('[AI] X: p25:', Math.round(p25), 'p75:', Math.round(p75), 'edgeThreshold:', Math.round(edgeThreshold));
+    console.log('[AI] X: edgeThreshold:', Math.round(edgeThreshold));
     
-    // Scan from LEFT: find first sustained high-activity zone (20px window above threshold)
-    let leftEdge = null;
-    for (let x = 20; x < width - 20; x++) {
-      // Check if a 20px window is mostly above threshold
-      let aboveCount = 0;
-      for (let dx = 0; dx < 20; dx++) {
-        if (smoothed[x + dx] > edgeThreshold) aboveCount++;
-      }
-      if (aboveCount >= 15) { // 75% of window above threshold
-        leftEdge = x;
-        break;
+    // Find ALL runs of sustained activity
+    const runs = [];
+    let runStart = -1;
+    for (let x = 0; x < width; x++) {
+      if (smoothed[x] > edgeThreshold) {
+        if (runStart === -1) runStart = x;
+      } else {
+        if (runStart !== -1) {
+          runs.push({ start: runStart, end: x - 1, len: x - runStart });
+          runStart = -1;
+        }
       }
     }
+    if (runStart !== -1) runs.push({ start: runStart, end: width - 1, len: width - runStart });
     
-    // Scan from RIGHT: find first sustained high-activity zone
-    let rightEdge = null;
-    for (let x = width - 21; x >= 20; x--) {
-      let aboveCount = 0;
-      for (let dx = 0; dx < 20; dx++) {
-        if (smoothed[x + dx] > edgeThreshold) aboveCount++;
+    console.log('[AI] X: runs:', runs.map(r => `[${r.start}-${r.end}](${r.len})`).join(' '));
+    
+    if (runs.length > 0) {
+      // Pick the LONGEST run = skier's trail (not the boat)
+      const longestRun = runs.reduce((a, b) => a.len > b.len ? a : b);
+      
+      console.log('[AI] X: longest run:', longestRun.start, '-', longestRun.end, 'len:', longestRun.len);
+      
+      // The mound is at one end. Check which end has a sharper/higher peak.
+      // The mound creates a bright splash; the far end of the wake just fades.
+      const leftZone = { start: longestRun.start, end: Math.min(longestRun.start + 60, longestRun.end) };
+      const rightZone = { start: Math.max(longestRun.end - 60, longestRun.start), end: longestRun.end };
+      
+      let leftPeak = 0, rightPeak = 0;
+      for (let x = leftZone.start; x <= leftZone.end; x++) {
+        if (smoothed[x] > leftPeak) leftPeak = smoothed[x];
       }
-      if (aboveCount >= 15) {
-        rightEdge = x + 19; // Right side of window
-        break;
+      for (let x = rightZone.start; x <= rightZone.end; x++) {
+        if (smoothed[x] > rightPeak) rightPeak = smoothed[x];
       }
-    }
-    
-    console.log('[AI] X: leftEdge:', leftEdge, 'rightEdge:', rightEdge);
-    
-    // The mound is on the RAMP SIDE edge.
-    // Ramp side has more frame space (camera shows the approach).
-    let moundEdge = null;
-    if (leftEdge !== null && rightEdge !== null) {
-      const leftSpace = leftEdge;
-      const rightSpace = width - rightEdge;
-      moundEdge = leftSpace >= rightSpace ? leftEdge : rightEdge;
-      console.log('[AI] X: leftSpace:', leftSpace, 'rightSpace:', rightSpace, 
-        'rampSide:', leftSpace >= rightSpace ? 'left' : 'right');
+      
+      console.log('[AI] X: leftPeak:', Math.round(leftPeak), 'rightPeak:', Math.round(rightPeak));
+      
+      // The mound end has the higher peak (splash is bright)
+      const moundIsLeft = leftPeak >= rightPeak;
+      const moundZoneStart = moundIsLeft ? leftZone.start : rightZone.start;
+      const moundZoneEnd = moundIsLeft ? leftZone.end : rightZone.end;
+      
+      // Find the peak column within the mound zone
+      let peakCol = moundZoneStart;
+      let peakVal = 0;
+      for (let x = moundZoneStart; x <= moundZoneEnd; x++) {
+        if (smoothed[x] > peakVal) {
+          peakVal = smoothed[x];
+          peakCol = x;
+        }
+      }
+      
+      landingX = peakCol;
+      console.log('[AI] X: moundSide:', moundIsLeft ? 'left' : 'right', 
+        'peakCol:', peakCol, '→ landingX:', Math.round(landingX));
     } else {
-      moundEdge = leftEdge || rightEdge || Math.floor(width / 2);
+      landingX = width / 2;
+      console.log('[AI] X: no runs found, fallback center');
     }
-    
-    // Fine-tune: find the peak bgDiff within ±50px of the edge
-    let peakCol = moundEdge;
-    let peakVal = 0;
-    const fineStart = Math.max(0, moundEdge - 50);
-    const fineEnd = Math.min(width - 1, moundEdge + 50);
-    for (let x = fineStart; x <= fineEnd; x++) {
-      if (smoothed[x] > peakVal) {
-        peakVal = smoothed[x];
-        peakCol = x;
-      }
-    }
-    
-    landingX = peakCol;
-    console.log('[AI] X: moundEdge:', moundEdge, 'peakCol:', peakCol, '→ landingX:', Math.round(landingX));
   }
 
   // Normalize landing X to 0..1
