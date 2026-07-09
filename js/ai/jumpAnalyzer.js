@@ -319,6 +319,47 @@ export async function analyzeJump(frames, onProgress = () => {}) {
     }
   }
   
+  // LOCATE RAMP precisely for debug marker
+  // On the ramp side, find the column with highest vertical variance
+  // (sky→ramp→water = high variance vs sky→water = lower variance)
+  let rampMarkerX = 0, rampMarkerY = 0;
+  if (rampIsRight !== null) {
+    const searchX1 = rampIsRight ? Math.floor(width * 0.7) : 0;
+    const searchX2 = rampIsRight ? width : Math.floor(width * 0.3);
+    
+    let bestCol = searchX1, bestVar = 0;
+    for (let x = searchX1; x < searchX2; x++) {
+      let sum = 0, sumSq = 0, cnt = 0;
+      for (let y = 0; y < height; y++) {
+        const v = bgGray[y * width + x];
+        sum += v; sumSq += v * v; cnt++;
+      }
+      const mean = sum / cnt;
+      const variance = (sumSq / cnt) - (mean * mean);
+      if (variance > bestVar) { bestVar = variance; bestCol = x; }
+    }
+    
+    // Find ramp Y: on bestCol, find topmost pixel significantly different from sky
+    // Sky = average of top 10 pixels
+    let skyVal = 0;
+    for (let y = 0; y < 10; y++) skyVal += bgGray[y * width + bestCol];
+    skyVal /= 10;
+    
+    let rampTopY = Math.floor(height * 0.5); // fallback
+    for (let y = 0; y < height; y++) {
+      if (Math.abs(bgGray[y * width + bestCol] - skyVal) > 30) {
+        rampTopY = y;
+        break;
+      }
+    }
+    
+    rampMarkerX = bestCol / width;
+    rampMarkerY = rampTopY / height;
+    
+    console.log('[AI] Ramp located: x=', bestCol, 'y=', rampTopY, 
+      'variance:', Math.round(bestVar));
+  }
+  
   // Fallback
   if (landingX === null) {
     landingX = lastKnownX || width / 2;
@@ -368,7 +409,7 @@ export async function analyzeJump(frames, onProgress = () => {}) {
     trajectory,
     peakFrame: peakFrame.frame,
     initialContact: initialContactFrame,
-    rampMarker: { x: rampIsRight ? 0.92 : 0.08, y: 0.3, side: rampIsRight ? 'right' : 'left' },
+    rampMarker: rampIsRight !== null ? { x: rampMarkerX, y: rampMarkerY } : null,
   };
 }
 
