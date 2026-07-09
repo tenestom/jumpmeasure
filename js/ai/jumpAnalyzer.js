@@ -309,7 +309,7 @@ export async function analyzeJump(frames, onProgress = () => {}) {
     
     // Find the main wake: longest continuous region of high activity
     const profileMedian = [...smoothed].sort((a, b) => a - b)[Math.floor(width / 2)];
-    const activityThreshold = Math.max(profileMedian * 3, 50);
+    const activityThreshold = Math.max(profileMedian * 1.5, 50);
     
     // Find the widest active region = main wake
     let bestRun = { start: 0, end: 0, len: 0 };
