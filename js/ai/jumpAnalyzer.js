@@ -276,17 +276,15 @@ export async function analyzeJump(frames, onProgress = () => {}) {
   }
 
   // Step 7: Find the precise X position of the mound
-  // The mound sits just BEFORE the main wake trail starts.
-  // Strategy: 
-  // 1. Find where the main wake starts using bgDiff column profile
-  // 2. Search a 200px zone before the wake start
-  // 3. Find the peak bgDiff column in that zone = the mound
+  // The mound is at the BEGINNING of the skier's water disturbance.
+  // Strategy: Scan from each side of the frame. The transition from 
+  // calm water to disturbed water = the mound (landing point).
   if (landingFrame !== null) {
     const landingGray = toGrayscale(frames[landingFrame]);
     
-    // Build bgDiff column profile (narrower Y band at waterline)
-    const moundRy1 = Math.floor(height * 0.38);
-    const moundRy2 = Math.floor(height * 0.46);
+    // Build bgDiff column profile (Y band at waterline)
+    const moundRy1 = Math.floor(height * 0.35);
+    const moundRy2 = Math.floor(height * 0.48);
     const bgDiffProfile = new Array(width).fill(0);
     
     for (let x = 0; x < width; x++) {
@@ -294,92 +292,86 @@ export async function analyzeJump(frames, onProgress = () => {}) {
       for (let y = moundRy1; y < moundRy2; y++) {
         const idx = y * width + x;
         const diff = Math.abs(landingGray[idx] - bgGray[idx]);
-        if (diff > 25 && landingGray[idx] > 150) {
+        if (diff > 20 && landingGray[idx] > 140) {
           colSum += diff;
         }
       }
       bgDiffProfile[x] = colSum;
     }
     
-    // Smooth the profile (5px moving average) to reduce noise
+    // Smooth with 15px window for stable edge detection
     const smoothed = new Array(width).fill(0);
-    for (let x = 2; x < width - 2; x++) {
-      smoothed[x] = (bgDiffProfile[x-2] + bgDiffProfile[x-1] + bgDiffProfile[x] + bgDiffProfile[x+1] + bgDiffProfile[x+2]) / 5;
+    for (let x = 7; x < width - 7; x++) {
+      let sum = 0;
+      for (let dx = -7; dx <= 7; dx++) sum += bgDiffProfile[x + dx];
+      smoothed[x] = sum / 15;
     }
     
-    // Find the main wake: longest continuous region of high activity
-    const profileMedian = [...smoothed].sort((a, b) => a - b)[Math.floor(width / 2)];
-    const activityThreshold = Math.max(profileMedian * 1.5, 50);
+    // Compute percentiles for threshold
+    const sorted = [...smoothed].filter(v => v > 0).sort((a, b) => a - b);
+    const p25 = sorted[Math.floor(sorted.length * 0.25)] || 0;
+    const p75 = sorted[Math.floor(sorted.length * 0.75)] || 0;
+    // Threshold: midpoint between quiet and active regions
+    const edgeThreshold = (p25 + p75) / 2;
     
-    // Find the widest active region = main wake
-    let bestRun = { start: 0, end: 0, len: 0 };
-    let runStart = -1;
-    for (let x = 0; x < width; x++) {
-      if (smoothed[x] > activityThreshold) {
-        if (runStart === -1) runStart = x;
-      } else {
-        if (runStart !== -1) {
-          const len = x - runStart;
-          if (len > bestRun.len) {
-            bestRun = { start: runStart, end: x - 1, len };
-          }
-          runStart = -1;
-        }
+    console.log('[AI] X: p25:', Math.round(p25), 'p75:', Math.round(p75), 'edgeThreshold:', Math.round(edgeThreshold));
+    
+    // Scan from LEFT: find first sustained high-activity zone (20px window above threshold)
+    let leftEdge = null;
+    for (let x = 20; x < width - 20; x++) {
+      // Check if a 20px window is mostly above threshold
+      let aboveCount = 0;
+      for (let dx = 0; dx < 20; dx++) {
+        if (smoothed[x + dx] > edgeThreshold) aboveCount++;
+      }
+      if (aboveCount >= 15) { // 75% of window above threshold
+        leftEdge = x;
+        break;
       }
     }
-    if (runStart !== -1) {
-      const len = width - runStart;
-      if (len > bestRun.len) bestRun = { start: runStart, end: width - 1, len };
+    
+    // Scan from RIGHT: find first sustained high-activity zone
+    let rightEdge = null;
+    for (let x = width - 21; x >= 20; x--) {
+      let aboveCount = 0;
+      for (let dx = 0; dx < 20; dx++) {
+        if (smoothed[x + dx] > edgeThreshold) aboveCount++;
+      }
+      if (aboveCount >= 15) {
+        rightEdge = x + 19; // Right side of window
+        break;
+      }
     }
     
-    console.log('[AI] X: mainWake run:', bestRun.start, '-', bestRun.end, 'len:', bestRun.len, 'threshold:', activityThreshold.toFixed(0));
+    console.log('[AI] X: leftEdge:', leftEdge, 'rightEdge:', rightEdge);
     
-    // Determine ramp side (more frame space = ramp)
-    const leftSpace = bestRun.start;
-    const rightSpace = width - bestRun.end;
-    const rampIsLeft = leftSpace >= rightSpace;
-    
-    // Search for mound in a zone BEFORE the wake starts (on ramp side)
-    // The mound is typically 50-200px from the wake start
-    let moundSearchStart, moundSearchEnd;
-    if (rampIsLeft) {
-      // Ramp on left → wake starts at bestRun.start → mound is left of that
-      moundSearchEnd = bestRun.start;
-      moundSearchStart = Math.max(0, bestRun.start - 200);
+    // The mound is on the RAMP SIDE edge.
+    // Ramp side has more frame space (camera shows the approach).
+    let moundEdge = null;
+    if (leftEdge !== null && rightEdge !== null) {
+      const leftSpace = leftEdge;
+      const rightSpace = width - rightEdge;
+      moundEdge = leftSpace >= rightSpace ? leftEdge : rightEdge;
+      console.log('[AI] X: leftSpace:', leftSpace, 'rightSpace:', rightSpace, 
+        'rampSide:', leftSpace >= rightSpace ? 'left' : 'right');
     } else {
-      // Ramp on right → wake ends at bestRun.end → mound is right of that
-      moundSearchStart = bestRun.end;
-      moundSearchEnd = Math.min(width - 1, bestRun.end + 200);
+      moundEdge = leftEdge || rightEdge || Math.floor(width / 2);
     }
     
-    console.log('[AI] X: rampSide:', rampIsLeft ? 'left' : 'right', 
-      'moundSearch:', moundSearchStart, '-', moundSearchEnd);
-    
-    // Find peak bgDiff column in the mound search zone
-    let peakCol = moundSearchStart;
+    // Fine-tune: find the peak bgDiff within ±50px of the edge
+    let peakCol = moundEdge;
     let peakVal = 0;
-    for (let x = moundSearchStart; x <= moundSearchEnd; x++) {
+    const fineStart = Math.max(0, moundEdge - 50);
+    const fineEnd = Math.min(width - 1, moundEdge + 50);
+    for (let x = fineStart; x <= fineEnd; x++) {
       if (smoothed[x] > peakVal) {
         peakVal = smoothed[x];
         peakCol = x;
       }
     }
     
-    // Centroid around peak (±25 cols)
-    if (peakVal > 0) {
-      let sumX = 0, sumW = 0;
-      for (let x = Math.max(moundSearchStart, peakCol - 25); x <= Math.min(moundSearchEnd, peakCol + 25); x++) {
-        if (smoothed[x] > activityThreshold * 0.3) {
-          sumX += x * smoothed[x];
-          sumW += smoothed[x];
-        }
-      }
-      landingX = sumW > 0 ? sumX / sumW : peakCol;
-    } else {
-      landingX = (moundSearchStart + moundSearchEnd) / 2;
-    }
-    
-    console.log('[AI] X: peakCol:', peakCol, 'peakVal:', peakVal.toFixed(0), '→ landingX:', Math.round(landingX));
+    landingX = peakCol;
+    console.log('[AI] X: moundEdge:', moundEdge, 'peakCol:', peakCol, '→ landingX:', Math.round(landingX));
   }
 
   // Normalize landing X to 0..1
