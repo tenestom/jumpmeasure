@@ -193,117 +193,106 @@ export async function analyzeJump(frames, onProgress = () => {}) {
   if (lastKnownX === null) lastKnownX = peakFrame.cx;
 
   // Search window: from initial contact to ~1s after
-  const fps = totalFrames / (totalFrames / 30); // Approximate
-  // New approach: Track the SKIER (dark object, high contrast vs water/sky).
-  // The skis are vertical dark lines. When the ski backs touch the water = landing.
-  // This gives us BOTH the frame AND the X position.
+  // New approach: Use FRAME-TO-FRAME motion in the waterline zone.
+  // The skier MOVES → creates per-column changes between consecutive frames.
+  // Static objects (boat, trees, reflections) DON'T change between frames.
   
-  // Search window: start before initial contact, scan until well after
   const safeContactFrame = initialContactFrame || Math.floor(totalFrames * 0.4);
-  const searchStart = Math.max(0, safeContactFrame - 5);
+  const searchStart = Math.max(1, safeContactFrame - 5);
   const searchEnd = Math.min(totalFrames - 1, safeContactFrame + 30);
   
-  // Waterline Y zone (where skis meet water)
+  // Waterline Y zone
   const skiContactY = Math.floor(height * 0.42);
-  const skierSearchTop = Math.floor(height * 0.35);    // Water surface zone (lighter bg)
-  const skierSearchBottom = Math.floor(height * 0.48);  // Below waterline slightly
+  const motionTop = Math.floor(height * 0.25);    // Include some air above waterline
+  const motionBottom = Math.floor(height * 0.50);  // Below waterline
   
   console.log('[AI] initialContactFrame:', initialContactFrame, 'peakFrame:', peakFrame.frame);
-  console.log('[AI] Skier tracking: searchStart:', searchStart, 'searchEnd:', searchEnd, 
-    'skiContactY:', skiContactY);
+  console.log('[AI] Motion tracking: searchStart:', searchStart, 'searchEnd:', searchEnd);
   
   let landingFrame = null;
   let landingX = null;
   
-  // For each frame, find the skier (darkest column cluster vs background ABOVE waterline)
-  const skierTrack = [];
+  const motionTrack = [];
   
   for (let f = searchStart; f <= searchEnd; f++) {
     const gray = toGrayscale(frames[f]);
+    const prevGray = toGrayscale(frames[f - 1]);
     
-    // Build column "darkness" profile — pixels that are NEW dark features
-    // (dark in current frame but NOT dark in background = skier, not boat)
-    const darkProfile = new Array(width).fill(null).map(() => ({ count: 0, lowestY: 0 }));
+    // Per-column motion score: sum of |frame - prevFrame| for changed pixels
+    const motionProfile = new Array(width).fill(0);
+    
     for (let x = 0; x < width; x++) {
-      let darkCount = 0;
-      let lowestDarkY = 0;
-      for (let y = skierSearchTop; y < skierSearchBottom; y++) {
+      let motionSum = 0;
+      for (let y = motionTop; y < motionBottom; y++) {
         const idx = y * width + x;
-        const darkerThanBg = bgGray[idx] - gray[idx];
-        // Must be: dark NOW, but was LIGHT in background (new dark object = skier)
-        // Boat is dark in both → filtered out
-        if (darkerThanBg > 30 && bgGray[idx] > 120) {
-          darkCount++;
-          if (y > lowestDarkY) lowestDarkY = y;
-        }
+        const diff = Math.abs(gray[idx] - prevGray[idx]);
+        if (diff > 15) motionSum += diff; // Only significant changes
       }
-      darkProfile[x] = { count: darkCount, lowestY: lowestDarkY };
+      motionProfile[x] = motionSum;
     }
     
-    // Find the column cluster with the most dark pixels (the skier)
-    // Smooth dark counts with 10px window
-    const smoothDark = new Array(width).fill(0);
-    for (let x = 5; x < width - 5; x++) {
+    // Smooth with 20px window (skier is ~20-40px wide)
+    const smoothMotion = new Array(width).fill(0);
+    for (let x = 10; x < width - 10; x++) {
       let sum = 0;
-      for (let dx = -5; dx <= 5; dx++) sum += darkProfile[x + dx].count;
-      smoothDark[x] = sum;
+      for (let dx = -10; dx <= 10; dx++) sum += motionProfile[x + dx];
+      smoothMotion[x] = sum;
     }
     
-    // Find the peak (skier position)
+    // Find the peak motion column (= where the skier is moving)
     let bestX = 0, bestVal = 0;
     for (let x = 0; x < width; x++) {
-      if (smoothDark[x] > bestVal) {
-        bestVal = smoothDark[x];
+      if (smoothMotion[x] > bestVal) {
+        bestVal = smoothMotion[x];
         bestX = x;
       }
     }
     
-    // Find the lowest dark pixel in the skier cluster (±40px around peak)
-    let lowestY = 0;
-    let skierCols = 0;
-    for (let x = Math.max(0, bestX - 40); x <= Math.min(width - 1, bestX + 40); x++) {
-      if (darkProfile[x].count > 3) {
-        skierCols++;
-        if (darkProfile[x].lowestY > lowestY) lowestY = darkProfile[x].lowestY;
-      }
-    }
+    // Also compute total motion in the frame (to detect landing spike)
+    let totalMotion = 0;
+    for (let x = 0; x < width; x++) totalMotion += motionProfile[x];
     
-    skierTrack.push({ frame: f, x: bestX, lowestY, darkScore: bestVal, cols: skierCols });
+    motionTrack.push({ frame: f, x: bestX, motionPeak: bestVal, totalMotion });
   }
   
-  // Log skier track
-  console.log('[AI] skierTrack:', skierTrack.map(s => 
-    `f${s.frame}:x=${s.x},lowY=${s.lowestY},dark=${s.darkScore}`
+  // Log motion track
+  console.log('[AI] motionTrack:', motionTrack.map(s => 
+    `f${s.frame}:x=${s.x},peak=${s.motionPeak},total=${s.totalMotion}`
   ).join(' | '));
   
-  // Find landing: the frame where darkScore SPIKES (skis enter water zone)
-  // First compute baseline darkScore (frames before landing = no skis in water)
-  const baselineEntries = skierTrack.slice(0, Math.min(5, skierTrack.length));
-  const baselineDark = baselineEntries.length > 0 
-    ? baselineEntries.reduce((s, e) => s + e.darkScore, 0) / baselineEntries.length 
-    : 0;
-  const spikeThreshold = Math.max(baselineDark * 2, baselineDark + 20, 10);
+  // Find the landing frame: look for a consistent X position in 3+ consecutive frames
+  // The skier lands and slides → consistent X in the water zone
+  // Before landing, skier is in the air → motion might be at different X (or absent)
   
-  console.log('[AI] baselineDark:', Math.round(baselineDark), 'spikeThreshold:', Math.round(spikeThreshold));
-  
-  for (const entry of skierTrack) {
-    if (entry.darkScore > spikeThreshold && entry.frame > searchStart + 3) {
-      landingFrame = entry.frame;
-      landingX = entry.x;
-      console.log('[AI] Landing (dark spike): frame', landingFrame, 'x:', landingX, 
-        'darkScore:', entry.darkScore);
-      break;
+  // Find runs of consistent X (within ±60px)
+  for (let i = 2; i < motionTrack.length; i++) {
+    const a = motionTrack[i - 2], b = motionTrack[i - 1], c = motionTrack[i];
+    
+    // All three frames have significant motion
+    if (a.motionPeak > 500 && b.motionPeak > 500 && c.motionPeak > 500) {
+      // X positions are consistent (within ±60px)
+      const xMedian = [a.x, b.x, c.x].sort((p, q) => p - q)[1];
+      const xSpread = Math.max(a.x, b.x, c.x) - Math.min(a.x, b.x, c.x);
+      
+      if (xSpread < 120) {
+        // First consistent run = landing
+        landingFrame = a.frame;
+        landingX = xMedian;
+        console.log('[AI] Landing (consistent motion): frame', landingFrame, 'x:', landingX,
+          'xSpread:', xSpread, 'peaks:', a.motionPeak, b.motionPeak, c.motionPeak);
+        break;
+      }
     }
   }
   
-  // Fallback: frame with highest darkScore
-  if (landingFrame === null && skierTrack.length > 0) {
-    const bestEntry = skierTrack.reduce((a, b) => a.darkScore > b.darkScore ? a : b);
-    if (bestEntry.darkScore > 5) {
-      landingFrame = bestEntry.frame;
-      landingX = bestEntry.x;
-      console.log('[AI] Landing (fallback peak dark): frame', landingFrame, 'x:', landingX, 
-        'darkScore:', bestEntry.darkScore);
+  // Fallback: frame with highest motion peak
+  if (landingFrame === null && motionTrack.length > 0) {
+    const best = motionTrack.reduce((a, b) => a.motionPeak > b.motionPeak ? a : b);
+    if (best.motionPeak > 100) {
+      landingFrame = best.frame;
+      landingX = best.x;
+      console.log('[AI] Landing (fallback peak motion): frame', landingFrame, 'x:', landingX,
+        'motionPeak:', best.motionPeak);
     }
   }
 
