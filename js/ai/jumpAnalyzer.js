@@ -381,14 +381,17 @@ export async function analyzeJump(frames, onProgress = () => {}) {
   
   const landGray = toGrayscale(frames[landingFrame]);
   
-  // Use ramp dimensions
+  // Use ramp dimensions — fallback if height detection failed (< 10px)
   const rampWaterY = rampNativeY || Math.floor(height * 0.30);
-  const rampHeight = (rampNativeTopY && rampNativeY) ? (rampNativeY - rampNativeTopY) : Math.floor(height * 0.08);
+  const detectedRampH = (rampNativeTopY && rampNativeY) ? (rampNativeY - rampNativeTopY) : 0;
+  const rampHeight = detectedRampH >= 10 ? detectedRampH : Math.floor(height * 0.10);
   
-  // Vertical strip: from rampTopY to rampBaseY (same height as ramp, = approx skier height)
+  // Vertical strip: from rampTopY to rampBaseY (same height as ramp = approx skier height)
   const stripTop = Math.max(0, rampWaterY - rampHeight);
-  const stripBot = rampWaterY;
-  const stripH = stripBot - stripTop;
+  const stripBot = Math.min(height - 1, rampWaterY + Math.floor(rampHeight * 0.3));
+  const stripH = Math.max(1, stripBot - stripTop);
+  
+  console.log('[AI] Strip: rampHeight=', rampHeight, 'stripTop=', stripTop, 'stripBot=', stripBot, 'stripH=', stripH);
   
   // Determine scan direction: from ramp edge outward
   // If ramp is right, scan LEFT from ramp. If ramp is left, scan RIGHT.
@@ -473,8 +476,18 @@ export async function analyzeJump(frames, onProgress = () => {}) {
       `[${c.start}-${c.end}](w=${c.width},cx=${c.cx},dist=${c.distToPred})`).join(' '));
   
   if (skierClusters.length > 0) {
+    // Exclude clusters that are within the ramp zone (too close to ramp)
+    const rampExcludeX = rampIsRight ? rampEdge : (rampNativeEndX || Math.floor(width * 0.3));
+    const rampExcludeMargin = 80; // px buffer around ramp
+    const validClusters = skierClusters.filter(c => 
+      rampIsRight ? c.cx < rampExcludeX - rampExcludeMargin
+                  : c.cx > rampExcludeX + rampExcludeMargin
+    );
+    
+    const candidates = validClusters.length > 0 ? validClusters : skierClusters;
+    
     // Pick the cluster closest to the predicted position from flight
-    const skierCluster = skierClusters.reduce((a, b) => 
+    const skierCluster = candidates.reduce((a, b) =>
       a.distToPred < b.distToPred ? a : b);
     
     // Use the edge of the cluster CLOSEST to the ramp = rear ski tip
