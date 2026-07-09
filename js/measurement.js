@@ -72,6 +72,22 @@ export function drawLine(ox, oy, vw, vh) {
   } else {
     measurementValue.textContent = '--.-- m';
   }
+  
+  // Debug: draw ramp marker as red dot
+  if (state.rampMarker) {
+    const rpx = ox + state.rampMarker.x * vw;
+    const rpy = oy + state.rampMarker.y * vh;
+    ctx.beginPath();
+    ctx.arc(rpx, rpy, 10, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(255, 0, 0, 0.8)';
+    ctx.fill();
+    ctx.strokeStyle = 'white';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.fillStyle = 'white';
+    ctx.font = '11px sans-serif';
+    ctx.fillText('RAMP', rpx + 14, rpy + 4);
+  }
 }
 
 export function drawCalibrationPoints(ox, oy) {

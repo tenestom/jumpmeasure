@@ -210,7 +210,7 @@ export async function analyzeJump(frames, onProgress = () => {}) {
   // For each column, compute the VERTICAL EXTENT of changed pixels.
   // Columns with tall changes = skier. Short changes = boat/noise.
   
-  const refFrame = Math.max(0, landingFrame - 5);
+  const refFrame = Math.max(0, landingFrame - 15); // 15 frames back for larger displacement
   const landingGray = toGrayscale(frames[landingFrame]);
   const refGray = toGrayscale(frames[refFrame]);
   
@@ -224,11 +224,12 @@ export async function analyzeJump(frames, onProgress = () => {}) {
   const vertMaxY = new Array(width).fill(0);
   
   // Waterline Y = same level as the ramp (peakFrame.cy)
-  // The skier at landing has skis at the SAME Y-level as the ramp
   const rampY = peakFrame.cy;
-  const waterlineTolerance = 40; // ±40px from ramp Y
+  const rampX = peakFrame.cx;
+  const waterlineTolerance = 50;
   
-  console.log('[AI] Ramp position: x=', Math.round(peakFrame.cx), 'y=', Math.round(rampY));
+  console.log('[AI] Ramp position: x=', Math.round(rampX), 'y=', Math.round(rampY),
+    'refFrame:', refFrame, 'landingFrame:', landingFrame);
   
   for (let x = 0; x < width; x++) {
     let minY = skierY2, maxY = skierY1;
@@ -236,15 +237,13 @@ export async function analyzeJump(frames, onProgress = () => {}) {
     for (let y = skierY1; y < skierY2; y++) {
       const idx = y * width + x;
       const diff = Math.abs(landingGray[idx] - refGray[idx]);
-      if (diff > 40) {
+      if (diff > 20) { // Lower threshold: dark skier on dark bg
         if (y < minY) minY = y;
         if (y > maxY) maxY = y;
         count++;
       }
     }
     vertMaxY[x] = maxY;
-    // ONLY count if changes reach the ramp's Y-level (±tolerance)
-    // This filters out trees (too high) and deep water changes (too low)
     if (maxY > (rampY - waterlineTolerance) && maxY > minY) {
       vertExtent[x] = maxY - minY;
     } else {
@@ -252,6 +251,17 @@ export async function analyzeJump(frames, onProgress = () => {}) {
     }
     vertCount[x] = count;
   }
+  
+  // Log raw vertExtent around the ramp area for diagnostics
+  const diagStart = Math.max(0, Math.round(rampX) - 300);
+  const diagEnd = Math.min(width - 1, Math.round(rampX) + 300);
+  const diagSamples = [];
+  for (let x = diagStart; x <= diagEnd; x += 10) {
+    if (vertExtent[x] > 0) {
+      diagSamples.push(`x${x}:v=${vertExtent[x]},maxY=${vertMaxY[x]},cnt=${vertCount[x]}`);
+    }
+  }
+  console.log('[AI] VertExtent near ramp:', diagSamples.join(' | '));
   
   // Smooth vertical extent with 5px window
   const smoothVert = new Array(width).fill(0);
@@ -261,8 +271,8 @@ export async function analyzeJump(frames, onProgress = () => {}) {
     smoothVert[x] = sum / 7;
   }
   
-  // Threshold: columns with tall changes (>60px vertical extent) = potential skier
-  const vertThreshold = 60;
+  // Lower threshold: 30px vertical extent minimum
+  const vertThreshold = 30;
   
   // Find clusters of tall-change columns
   const skierClusters = [];
@@ -273,10 +283,8 @@ export async function analyzeJump(frames, onProgress = () => {}) {
     } else {
       if (cStart !== -1) {
         const cWidth = x - cStart;
-        // Skier is narrow: 10-80px wide
-        if (cWidth >= 10 && cWidth <= 80) {
-          let mass = 0, weightedX = 0;
-          let avgVert = 0;
+        if (cWidth >= 5 && cWidth <= 120) { // Wider range
+          let mass = 0, weightedX = 0, avgVert = 0;
           for (let cx = cStart; cx < x; cx++) {
             mass += vertExtent[cx];
             weightedX += cx * vertExtent[cx];
@@ -284,7 +292,7 @@ export async function analyzeJump(frames, onProgress = () => {}) {
           }
           avgVert /= cWidth;
           const centroid = Math.round(weightedX / mass);
-          const aspectRatio = avgVert / cWidth; // High = vertical = skier
+          const aspectRatio = avgVert / cWidth;
           skierClusters.push({ start: cStart, end: x - 1, width: cWidth, mass, centroid, avgVert: Math.round(avgVert), aspectRatio: aspectRatio.toFixed(1) });
         }
         cStart = -1;
@@ -293,7 +301,7 @@ export async function analyzeJump(frames, onProgress = () => {}) {
   }
   if (cStart !== -1) {
     const cWidth = width - cStart;
-    if (cWidth >= 10 && cWidth <= 80) {
+    if (cWidth >= 5 && cWidth <= 120) {
       let mass = 0, weightedX = 0, avgVert = 0;
       for (let cx = cStart; cx < width; cx++) {
         mass += vertExtent[cx];
@@ -307,13 +315,10 @@ export async function analyzeJump(frames, onProgress = () => {}) {
     }
   }
   
-  // Ramp position estimate: peakFrame.cx is likely the ramp (blob tracker was stationary there)
-  const rampX = peakFrame.cx;
-  const rampRadius = 400; // Skier lands within 400px of ramp
+  const rampRadius = 400;
   
-  console.log('[AI] Skier detection in frame', landingFrame, 
-    '(ref:', refFrame, ') vertThreshold:', vertThreshold,
-    'rampX:', Math.round(rampX), 'searchRange:', Math.round(rampX - rampRadius), '-', Math.round(rampX + rampRadius));
+  console.log('[AI] Skier detection: vertThreshold:', vertThreshold,
+    'rampX:', Math.round(rampX), 'range:', Math.round(rampX - rampRadius), '-', Math.round(rampX + rampRadius));
   console.log('[AI] All clusters:', skierClusters.map(c => 
     `[${c.start}-${c.end}](w=${c.width},h=${c.avgVert},ar=${c.aspectRatio},cx=${c.centroid})`).join(' '));
   
@@ -326,7 +331,6 @@ export async function analyzeJump(frames, onProgress = () => {}) {
     `[${c.start}-${c.end}](w=${c.width},h=${c.avgVert},ar=${c.aspectRatio},cx=${c.centroid})`).join(' '));
   
   if (nearRampClusters.length > 0) {
-    // Pick the cluster with the highest aspect ratio (most vertical) = the skier
     const skierCluster = nearRampClusters.reduce((a, b) => 
       parseFloat(a.aspectRatio) > parseFloat(b.aspectRatio) ? a : b);
     landingX = skierCluster.centroid;
@@ -384,6 +388,7 @@ export async function analyzeJump(frames, onProgress = () => {}) {
     trajectory,
     peakFrame: peakFrame.frame,
     initialContact: initialContactFrame,
+    rampMarker: { x: rampX / width, y: rampY / height }, // Debug: ramp position
   };
 }
 

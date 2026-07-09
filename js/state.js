@@ -18,6 +18,7 @@ export const state = {
   lastPinchMidX: 0,
   lastPinchMidY: 0,
   rafId: null,
+  rampMarker: null,  // {x, y} normalized 0..1 — debug: ramp position
 };
 
 export const ZOOM_MIN = 1;
