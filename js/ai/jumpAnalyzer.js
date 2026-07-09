@@ -365,19 +365,33 @@ export async function analyzeJump(frames, onProgress = () => {}) {
     }
   }
   
+  console.log('[AI] frameWidth:', width, 'frameHeight:', height);
+  
   // STEP 2: FIND SKIER USING COLUMN-TO-NEIGHBOR COMPARISON
   // The skier blocks the background — their columns look different from neighboring columns.
   // No background model needed. Compare each column to its local neighbors in the SAME frame.
-  // Scan from the ramp edge outward — first significant deviation = the skier.
+  // Scan from the ramp edge outward — FIRST WIDE cluster = the skier.
   let blobBox = null;
   
-  // Get predicted X from flight phase (for disambiguation)
+  // Get last known flight blob position (for visualization and fallback)
   let predX = lastKnownX || (peakFrame ? peakFrame.cx : width / 2);
+  let predBlobFrame = -1;
   for (let f = Math.max(0, safeContactFrame - 5); f <= safeContactFrame; f++) {
     if (f < trackingData.length && trackingData[f].detected && trackingData[f].area < 5000) {
       predX = trackingData[f].cx;
+      predBlobFrame = f;
     }
   }
+  
+  // Save last flight blob for visualization
+  const lastFlightBlob = predBlobFrame >= 0 ? trackingData[predBlobFrame] : null;
+  const predBlobBox = lastFlightBlob ? {
+    x: lastFlightBlob.bbox.x / width,
+    y: lastFlightBlob.bbox.y / height,
+    w: lastFlightBlob.bbox.w / width,
+    h: lastFlightBlob.bbox.h / height,
+  } : null;
+  console.log('[AI] Last flight blob: frame', predBlobFrame, 'cx=', predX, 'bbox=', lastFlightBlob ? JSON.stringify(lastFlightBlob.bbox) : 'none');
   
   const landGray = toGrayscale(frames[landingFrame]);
   
@@ -484,10 +498,18 @@ export async function analyzeJump(frames, onProgress = () => {}) {
                   : c.cx > rampExcludeX + rampExcludeMargin
     );
     
-    const candidates = validClusters.length > 0 ? validClusters : skierClusters;
+    // FIRST: try to find the first WIDE cluster scanning from ramp outward
+    // Wide = likely a real object (skier), narrow = noise/trees
+    // Scan order: clusters are ordered by scan direction (ramp outward)
+    // We need to sort by proximity to ramp
+    const sortedByRamp = [...validClusters].sort((a, b) =>
+      rampIsRight ? b.cx - a.cx : a.cx - b.cx // closest to ramp first
+    );
     
-    // Pick the cluster closest to the predicted position from flight
-    const skierCluster = candidates.reduce((a, b) =>
+    // Take first cluster with width >= 15px (skier-sized), skip narrow noise
+    const wideCluster = sortedByRamp.find(c => c.width >= 15);
+    // Fallback: first cluster of any width
+    const skierCluster = wideCluster || sortedByRamp[0] || candidates.reduce((a, b) =>
       a.distToPred < b.distToPred ? a : b);
     
     // Use the edge of the cluster CLOSEST to the ramp = rear ski tip
@@ -556,6 +578,8 @@ export async function analyzeJump(frames, onProgress = () => {}) {
     initialContact: initialContactFrame,
     rampMarker: rampIsRight !== null ? { x: rampMarkerX, y: rampMarkerY } : null,
     blobBox,
+    predBlobBox,
+    frameWidth: width,
   };
 }
 

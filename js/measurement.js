@@ -45,8 +45,9 @@ export function drawLine(ox, oy, vw, vh) {
     ctx.stroke();
 
     // Measurement display
-    // Show pixel X position for debugging/feedback
-    const pixelXDisplay = Math.round(state.lineX * vw);
+    // Show native pixel X (same as algorithm logs)
+    const nativePixelX = Math.round(state.lineX * (state.aiFrameWidth || vw));
+    const pixelXDisplay = nativePixelX;
     const meters = getInterpolatedValue(state.lineX * vw, state.calibPoints);
     if (meters !== null) {
       const finalMeters = meters;
@@ -103,6 +104,22 @@ export function drawLine(ox, oy, vw, vh) {
     ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
     ctx.font = '11px sans-serif';
     ctx.fillText('BLOB', bx, by - 4);
+  }
+  
+  // Draw last flight blob (yellow) - where skier was just before landing
+  if (state.predBlobBox) {
+    const pbx = ox + state.predBlobBox.x * vw;
+    const pby = oy + state.predBlobBox.y * vh;
+    const pbw = state.predBlobBox.w * vw;
+    const pbh = state.predBlobBox.h * vh;
+    ctx.beginPath();
+    ctx.rect(pbx, pby, pbw, pbh);
+    ctx.strokeStyle = 'rgba(255, 220, 0, 0.9)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.fillStyle = 'rgba(255, 220, 0, 0.9)';
+    ctx.font = '11px sans-serif';
+    ctx.fillText('FLIGHT', pbx, pby - 4);
   }
 }
 

@@ -299,6 +299,8 @@ if (aiDetectBtn) {
         state.lineX = result.landingX;
         state.rampMarker = result.rampMarker || null;
         state.blobBox = result.blobBox || null;
+        state.predBlobBox = result.predBlobBox || null;
+        state.aiFrameWidth = result.frameWidth || null;
         
         // Navigate to the landing frame
         if (result.landingFrameIndex !== null) {
