@@ -276,178 +276,110 @@ export async function analyzeJump(frames, onProgress = () => {}) {
   }
 
   // Step 7: Find the precise X position of the mound
-  // The mound is a small ISOLATED bright feature. The wake trail is a broad band.
+  // The mound sits just BEFORE the main wake trail starts.
   // Strategy: 
-  // 1. Triple filter: pixel must be brighter vs BOTH pre-mound AND background (strict)
-  // 2. Build column profile of passing pixels
-  // 3. Find the most ISOLATED bright cluster (farthest from the main wake mass)
+  // 1. Find where the main wake starts using bgDiff column profile
+  // 2. Search a 200px zone before the wake start
+  // 3. Find the peak bgDiff column in that zone = the mound
   if (landingFrame !== null) {
-    const preMoundIdx = Math.max(0, landingFrame - 4);
     const landingGray = toGrayscale(frames[landingFrame]);
-    const preMoundGray = toGrayscale(frames[preMoundIdx]);
     
-    // Build per-column count of truly NEW bright pixels (triple filter)
-    const colProfile = new Array(width).fill(0);
-    let totalNewPixels = 0;
+    // Build bgDiff column profile (narrower Y band at waterline)
+    const moundRy1 = Math.floor(height * 0.38);
+    const moundRy2 = Math.floor(height * 0.46);
+    const bgDiffProfile = new Array(width).fill(0);
     
-    for (let y = ry1; y < ry2; y++) {
-      for (let x = rx1; x < rx2; x++) {
+    for (let x = 0; x < width; x++) {
+      let colSum = 0;
+      for (let y = moundRy1; y < moundRy2; y++) {
         const idx = y * width + x;
-        const vsPreMound = landingGray[idx] - preMoundGray[idx];
-        const vsBg = landingGray[idx] - bgGray[idx];
-        // Must be brighter than BOTH pre-mound AND background, and bright overall
-        if (vsPreMound > 30 && vsBg > 30 && landingGray[idx] > 180) {
-          colProfile[x]++;
-          totalNewPixels++;
+        const diff = Math.abs(landingGray[idx] - bgGray[idx]);
+        if (diff > 25 && landingGray[idx] > 150) {
+          colSum += diff;
+        }
+      }
+      bgDiffProfile[x] = colSum;
+    }
+    
+    // Smooth the profile (5px moving average) to reduce noise
+    const smoothed = new Array(width).fill(0);
+    for (let x = 2; x < width - 2; x++) {
+      smoothed[x] = (bgDiffProfile[x-2] + bgDiffProfile[x-1] + bgDiffProfile[x] + bgDiffProfile[x+1] + bgDiffProfile[x+2]) / 5;
+    }
+    
+    // Find the main wake: longest continuous region of high activity
+    const profileMedian = [...smoothed].sort((a, b) => a - b)[Math.floor(width / 2)];
+    const activityThreshold = Math.max(profileMedian * 3, 50);
+    
+    // Find the widest active region = main wake
+    let bestRun = { start: 0, end: 0, len: 0 };
+    let runStart = -1;
+    for (let x = 0; x < width; x++) {
+      if (smoothed[x] > activityThreshold) {
+        if (runStart === -1) runStart = x;
+      } else {
+        if (runStart !== -1) {
+          const len = x - runStart;
+          if (len > bestRun.len) {
+            bestRun = { start: runStart, end: x - 1, len };
+          }
+          runStart = -1;
         }
       }
     }
+    if (runStart !== -1) {
+      const len = width - runStart;
+      if (len > bestRun.len) bestRun = { start: runStart, end: width - 1, len };
+    }
     
-    console.log('[AI] X: totalNewPixels (triple filter):', totalNewPixels);
+    console.log('[AI] X: mainWake run:', bestRun.start, '-', bestRun.end, 'len:', bestRun.len, 'threshold:', activityThreshold.toFixed(0));
     
-    if (totalNewPixels > 5) {
-      // Find all clusters of bright columns (groups of consecutive cols with count > 0)
-      const clusters = [];
-      let cStart = -1;
-      for (let x = 0; x < width; x++) {
-        if (colProfile[x] > 0) {
-          if (cStart === -1) cStart = x;
-        } else {
-          if (cStart !== -1) {
-            const cEnd = x - 1;
-            let mass = 0;
-            let sumCx = 0;
-            for (let cx = cStart; cx <= cEnd; cx++) {
-              mass += colProfile[cx];
-              sumCx += cx * colProfile[cx];
-            }
-            clusters.push({ start: cStart, end: cEnd, width: cEnd - cStart + 1, mass, centroid: sumCx / mass });
-            cStart = -1;
-          }
-        }
-      }
-      // Handle cluster at edge
-      if (cStart !== -1) {
-        const cEnd = width - 1;
-        let mass = 0, sumCx = 0;
-        for (let cx = cStart; cx <= cEnd; cx++) { mass += colProfile[cx]; sumCx += cx * colProfile[cx]; }
-        clusters.push({ start: cStart, end: cEnd, width: cEnd - cStart + 1, mass, centroid: sumCx / mass });
-      }
-      
-      console.log('[AI] X: found', clusters.length, 'clusters:', 
-        clusters.map(c => `[${c.start}-${c.end}](w=${c.width},m=${c.mass})`).join(' '));
-      
-      if (clusters.length === 1) {
-        landingX = clusters[0].centroid;
-      } else if (clusters.length > 1) {
-        // Find the LARGEST cluster = main wake trail
-        const mainWake = clusters.reduce((a, b) => a.mass > b.mass ? a : b);
-        
-        // Find clusters ADJACENT to the main wake (within 20px gap)
-        const adjacent = clusters.filter(c => 
-          c !== mainWake && 
-          c.mass >= 10 && // Significant (not edge noise)
-          (Math.abs(c.end - mainWake.start) < 20 || Math.abs(c.start - mainWake.end) < 20)
-        );
-        
-        console.log('[AI] X: mainWake:', mainWake.start, '-', mainWake.end, 
-          'adjacent:', adjacent.map(c => `[${c.start}-${c.end}]`).join(' '));
-        
-        let moundCluster = null;
-        if (adjacent.length === 1) {
-          moundCluster = adjacent[0];
-        } else if (adjacent.length > 1) {
-          // Two adjacent clusters = one on each side of the wake.
-          // The mound is on the RAMP SIDE. The ramp side has more frame space
-          // (camera shows the approach/ramp with more room).
-          const leftSpace = mainWake.start;          // pixels from left edge to wake
-          const rightSpace = width - mainWake.end;   // pixels from wake to right edge
-          
-          // Pick the adjacent cluster on the side with MORE space = ramp side
-          const rampSide = leftSpace >= rightSpace ? 'left' : 'right';
-          const rampCluster = adjacent.find(c => 
-            rampSide === 'left' ? c.end < mainWake.start : c.start > mainWake.end
-          );
-          moundCluster = rampCluster || adjacent[0];
-          console.log('[AI] X: leftSpace:', leftSpace, 'rightSpace:', rightSpace, 
-            'rampSide:', rampSide, 'picked:', moundCluster.start, '-', moundCluster.end);
-        }
-        
-        if (moundCluster) {
-          // The mound is in this cluster, near the wake but NOT in the transition zone
-          // Split the cluster into zones:
-          //   - Far zone (0-70%): boat, other objects — ignore
-          //   - Mound zone (70-90%): where the mound is — search here
-          //   - Transition zone (90-100%): wake blending — ignore
-          const isLeftOfWake = moundCluster.end < mainWake.start;
-          let searchStart, searchEnd;
-          if (isLeftOfWake) {
-            // Cluster LEFT of wake — mound is toward the RIGHT end
-            searchStart = Math.round(moundCluster.start + moundCluster.width * 0.55);
-            searchEnd = Math.round(moundCluster.end - moundCluster.width * 0.10);
-          } else {
-            // Cluster RIGHT of wake — mound is toward the LEFT end
-            searchStart = Math.round(moundCluster.start + moundCluster.width * 0.10);
-            searchEnd = Math.round(moundCluster.start + moundCluster.width * 0.45);
-          }
-          searchStart = Math.max(searchStart, moundCluster.start);
-          searchEnd = Math.min(searchEnd, moundCluster.end);
-          
-          // Find peak density column in the mound zone
-          let peakCol = searchStart;
-          let peakCount = 0;
-          for (let x = searchStart; x <= searchEnd; x++) {
-            if (colProfile[x] > peakCount) {
-              peakCount = colProfile[x];
-              peakCol = x;
-            }
-          }
-          
-          // Centroid around the peak (±30 cols within search range)
-          let sumX = 0, sumW = 0;
-          const cStart = Math.max(searchStart, peakCol - 30);
-          const cEnd = Math.min(searchEnd, peakCol + 30);
-          for (let x = cStart; x <= cEnd; x++) {
-            sumX += x * colProfile[x];
-            sumW += colProfile[x];
-          }
-          landingX = sumW > 0 ? sumX / sumW : peakCol;
-          console.log('[AI] X: mound cluster [', moundCluster.start, '-', moundCluster.end, 
-            '] searchZone:', searchStart, '-', searchEnd, 'peakCol:', peakCol,
-            '→ landingX:', Math.round(landingX));
-        } else {
-          // No adjacent cluster found — use edge of main wake closest to frame edge
-          // (The mound is at the beginning of the trail)
-          const distToLeft = mainWake.start;
-          const distToRight = width - mainWake.end;
-          if (distToLeft < distToRight) {
-            // Wake starts from left — mound at left edge
-            landingX = mainWake.start;
-          } else {
-            // Wake starts from right — mound at right edge
-            landingX = mainWake.end;
-          }
-          console.log('[AI] X: no adjacent cluster, using wake edge:', Math.round(landingX));
-        }
+    // Determine ramp side (more frame space = ramp)
+    const leftSpace = bestRun.start;
+    const rightSpace = width - bestRun.end;
+    const rampIsLeft = leftSpace >= rightSpace;
+    
+    // Search for mound in a zone BEFORE the wake starts (on ramp side)
+    // The mound is typically 50-200px from the wake start
+    let moundSearchStart, moundSearchEnd;
+    if (rampIsLeft) {
+      // Ramp on left → wake starts at bestRun.start → mound is left of that
+      moundSearchEnd = bestRun.start;
+      moundSearchStart = Math.max(0, bestRun.start - 200);
+    } else {
+      // Ramp on right → wake ends at bestRun.end → mound is right of that
+      moundSearchStart = bestRun.end;
+      moundSearchEnd = Math.min(width - 1, bestRun.end + 200);
+    }
+    
+    console.log('[AI] X: rampSide:', rampIsLeft ? 'left' : 'right', 
+      'moundSearch:', moundSearchStart, '-', moundSearchEnd);
+    
+    // Find peak bgDiff column in the mound search zone
+    let peakCol = moundSearchStart;
+    let peakVal = 0;
+    for (let x = moundSearchStart; x <= moundSearchEnd; x++) {
+      if (smoothed[x] > peakVal) {
+        peakVal = smoothed[x];
+        peakCol = x;
       }
     }
     
-    if (landingX === null) {
-      // Fallback: weighted centroid of bg-diff
-      let sx = 0, sw = 0;
-      const landingGrayFb = toGrayscale(frames[landingFrame]);
-      for (let y = ry1; y < ry2; y++) {
-        for (let x = rx1; x < rx2; x++) {
-          const idx = y * width + x;
-          const bgDiff = Math.abs(landingGrayFb[idx] - bgGray[idx]);
-          if (bgDiff > 40 && landingGrayFb[idx] > 170) { sx += x * bgDiff; sw += bgDiff; }
+    // Centroid around peak (±25 cols)
+    if (peakVal > 0) {
+      let sumX = 0, sumW = 0;
+      for (let x = Math.max(moundSearchStart, peakCol - 25); x <= Math.min(moundSearchEnd, peakCol + 25); x++) {
+        if (smoothed[x] > activityThreshold * 0.3) {
+          sumX += x * smoothed[x];
+          sumW += smoothed[x];
         }
       }
-      landingX = sw > 0 ? sx / sw : width / 2;
-      console.log('[AI] X: fallback bg-diff centroid:', Math.round(landingX));
+      landingX = sumW > 0 ? sumX / sumW : peakCol;
+    } else {
+      landingX = (moundSearchStart + moundSearchEnd) / 2;
     }
     
-    console.log('[AI] X: final landingX:', Math.round(landingX));
+    console.log('[AI] X: peakCol:', peakCol, 'peakVal:', peakVal.toFixed(0), '→ landingX:', Math.round(landingX));
   }
 
   // Normalize landing X to 0..1
