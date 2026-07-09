@@ -192,97 +192,135 @@ export async function analyzeJump(frames, onProgress = () => {}) {
   }
   if (lastKnownX === null) lastKnownX = peakFrame.cx;
 
-  // NEW APPROACH: Extrapolate the FLIGHT TRAJECTORY to predict landing.
-  // During flight, the blob tracker has good data (skier against sky = high contrast).
-  // Fit cx(frame) linear and cy(frame) quadratic, extrapolate to waterline.
+  // HYBRID APPROACH:
+  // Frame: initialContactFrame + 7 (ski contact is ~7 frames after blob tracker's estimate)
+  // X: Detect splash at a LATER frame where it's visible, then use that X position
   
   let landingFrame = null;
   let landingX = null;
   
-  // Collect reliable flight data (detected frames between peak and contact)
-  const flightData = [];
-  for (let f = peakFrame.frame; f <= (initialContactFrame || totalFrames - 1); f++) {
-    if (f < trackingData.length && trackingData[f] && trackingData[f].detected) {
-      flightData.push({ frame: f, cx: trackingData[f].cx, cy: trackingData[f].cy });
-    }
-  }
+  const safeContactFrame = initialContactFrame || Math.floor(totalFrames * 0.4);
+  landingFrame = Math.min(safeContactFrame + 7, totalFrames - 1);
   
   console.log('[AI] initialContactFrame:', initialContactFrame, 'peakFrame:', peakFrame.frame);
-  console.log('[AI] Flight data points:', flightData.length, 
-    'range: f' + (flightData.length > 0 ? flightData[0].frame : '?') + 
-    '-f' + (flightData.length > 0 ? flightData[flightData.length - 1].frame : '?'));
+  console.log('[AI] Landing frame (contact+7):', landingFrame);
   
-  if (flightData.length >= 3) {
-    // Log flight trajectory
-    console.log('[AI] flightTrack:', flightData.map(d => 
-      `f${d.frame}:x=${Math.round(d.cx)},y=${Math.round(d.cy)}`
-    ).join(' | '));
-    
-    // Fit linear regression for X: cx = a*frame + b
-    // Use the LAST portion of flight (descent phase, most relevant for landing)
-    const useData = flightData.slice(-Math.min(flightData.length, 15));
-    
-    const n = useData.length;
-    let sumF = 0, sumX = 0, sumY = 0, sumFF = 0, sumFX = 0, sumFY = 0;
-    let sumFFF = 0, sumFFFF = 0, sumFFY = 0;
-    
-    for (const d of useData) {
-      sumF += d.frame;
-      sumX += d.cx;
-      sumY += d.cy;
-      sumFF += d.frame * d.frame;
-      sumFX += d.frame * d.cx;
-      sumFY += d.frame * d.cy;
-      sumFFF += d.frame * d.frame * d.frame;
-      sumFFFF += d.frame * d.frame * d.frame * d.frame;
-      sumFFY += d.frame * d.frame * d.cy;
+  // For X: analyze a LATER frame where the splash/wake is visible
+  // The splash appears ~15-25 frames after ski contact
+  const splashFrame = Math.min(safeContactFrame + 23, totalFrames - 1);
+  const splashGray = toGrayscale(frames[splashFrame]);
+  
+  // Build bgDiff column profile at waterline
+  const splashRy1 = Math.floor(height * 0.35);
+  const splashRy2 = Math.floor(height * 0.48);
+  
+  // Triple filter: brighter than both background AND pre-splash frame
+  const preSplashGray = toGrayscale(frames[Math.max(0, splashFrame - 4)]);
+  const colProfile = new Array(width).fill(0);
+  let totalNewPixels = 0;
+  
+  for (let y = splashRy1; y < splashRy2; y++) {
+    for (let x = 0; x < width; x++) {
+      const idx = y * width + x;
+      const vsPreSplash = splashGray[idx] - preSplashGray[idx];
+      const vsBg = splashGray[idx] - bgGray[idx];
+      if (vsPreSplash > 30 && vsBg > 30 && splashGray[idx] > 180) {
+        colProfile[x]++;
+        totalNewPixels++;
+      }
     }
-    
-    // Linear fit for X: cx = aX * frame + bX
-    const denomX = n * sumFF - sumF * sumF;
-    const aX = denomX !== 0 ? (n * sumFX - sumF * sumX) / denomX : 0;
-    const bX = (sumX - aX * sumF) / n;
-    
-    // Quadratic fit for Y: cy = aY * frame^2 + bY * frame + cY
-    // Using normal equations for quadratic
-    // Simplified: just use the last few points to estimate descent rate
-    const lastPoint = useData[useData.length - 1];
-    const midPoint = useData[Math.floor(useData.length / 2)];
-    const firstPoint = useData[0];
-    
-    // Linear descent rate for Y (simpler, more robust than quadratic)
-    const descentRate = n > 1 ? (lastPoint.cy - firstPoint.cy) / (lastPoint.frame - firstPoint.frame) : 0;
-    
-    console.log('[AI] Trajectory fit: aX:', aX.toFixed(2), 'bX:', bX.toFixed(0),
-      'descentRate:', descentRate.toFixed(2), 'lastCy:', Math.round(lastPoint.cy));
-    
-    // Extrapolate: find the frame where cy reaches the waterline
-    const landingWaterlineY = height * 0.48; // Where skis touch water
-    
-    if (descentRate > 0 && lastPoint.cy < landingWaterlineY) {
-      // Frames until waterline contact
-      const framesToContact = (landingWaterlineY - lastPoint.cy) / descentRate;
-      const predictedFrame = Math.round(lastPoint.frame + framesToContact);
-      const predictedX = aX * predictedFrame + bX;
-      
-      landingFrame = Math.min(predictedFrame, totalFrames - 1);
-      landingX = Math.max(0, Math.min(width - 1, predictedX));
-      
-      console.log('[AI] Predicted landing: frame', landingFrame, 'x:', Math.round(landingX),
-        'framesToContact:', framesToContact.toFixed(1),
-        'waterlineY:', Math.round(landingWaterlineY));
-    } else {
-      // Fallback: use last known position
-      landingFrame = lastPoint.frame + 5;
-      landingX = lastPoint.cx;
-      console.log('[AI] Landing fallback (no descent): frame', landingFrame, 'x:', Math.round(landingX));
-    }
-  } else {
-    // Not enough flight data — use contact frame and lastKnownX
-    landingFrame = (initialContactFrame || Math.floor(totalFrames * 0.5)) + 5;
-    landingX = lastKnownX || width / 2;
-    console.log('[AI] Landing fallback (no flight data): frame', landingFrame, 'x:', Math.round(landingX));
   }
+  
+  console.log('[AI] X: splashFrame:', splashFrame, 'totalNewPixels:', totalNewPixels);
+  
+  if (totalNewPixels > 5) {
+    // Find clusters
+    const clusters = [];
+    let cStart = -1;
+    for (let x = 0; x < width; x++) {
+      if (colProfile[x] > 0) {
+        if (cStart === -1) cStart = x;
+      } else {
+        if (cStart !== -1) {
+          let mass = 0;
+          for (let cx = cStart; cx <= x - 1; cx++) mass += colProfile[cx];
+          clusters.push({ start: cStart, end: x - 1, width: x - cStart, mass });
+          cStart = -1;
+        }
+      }
+    }
+    if (cStart !== -1) {
+      let mass = 0;
+      for (let cx = cStart; cx < width; cx++) mass += colProfile[cx];
+      clusters.push({ start: cStart, end: width - 1, width: width - cStart, mass });
+    }
+    
+    console.log('[AI] X: clusters:', clusters.map(c => 
+      `[${c.start}-${c.end}](w=${c.width},m=${c.mass})`).join(' '));
+    
+    if (clusters.length > 1) {
+      // Largest cluster = main wake
+      const mainWake = clusters.reduce((a, b) => a.mass > b.mass ? a : b);
+      
+      // Adjacent cluster on the ramp side = contains the mound
+      const adjacent = clusters.filter(c => 
+        c !== mainWake && c.mass >= 10 &&
+        (Math.abs(c.end - mainWake.start) < 20 || Math.abs(c.start - mainWake.end) < 20)
+      );
+      
+      let moundCluster = null;
+      if (adjacent.length === 1) {
+        moundCluster = adjacent[0];
+      } else if (adjacent.length > 1) {
+        const leftSpace = mainWake.start;
+        const rightSpace = width - mainWake.end;
+        const rampSide = leftSpace >= rightSpace ? 'left' : 'right';
+        moundCluster = adjacent.find(c => 
+          rampSide === 'left' ? c.end < mainWake.start : c.start > mainWake.end
+        ) || adjacent[0];
+      }
+      
+      if (moundCluster) {
+        // The mound is at the wake-facing edge of this cluster
+        // Use the 55-90% zone (skip boat at far end, skip transition at wake end)
+        const isLeftOfWake = moundCluster.end < mainWake.start;
+        let searchStart, searchEnd;
+        if (isLeftOfWake) {
+          searchStart = Math.round(moundCluster.start + moundCluster.width * 0.55);
+          searchEnd = Math.round(moundCluster.end - moundCluster.width * 0.10);
+        } else {
+          searchStart = Math.round(moundCluster.start + moundCluster.width * 0.10);
+          searchEnd = Math.round(moundCluster.start + moundCluster.width * 0.45);
+        }
+        searchStart = Math.max(searchStart, moundCluster.start);
+        searchEnd = Math.min(searchEnd, moundCluster.end);
+        
+        // Peak density in the mound zone
+        let peakCol = searchStart, peakCount = 0;
+        for (let x = searchStart; x <= searchEnd; x++) {
+          if (colProfile[x] > peakCount) { peakCount = colProfile[x]; peakCol = x; }
+        }
+        
+        landingX = peakCol;
+        console.log('[AI] X: moundCluster [', moundCluster.start, '-', moundCluster.end,
+          '] searchZone:', searchStart, '-', searchEnd, '→ landingX:', landingX);
+      } else {
+        // No adjacent cluster — use wake edge
+        landingX = mainWake.start;
+        console.log('[AI] X: no adjacent, using wake start:', landingX);
+      }
+    } else if (clusters.length === 1) {
+      landingX = clusters[0].start;
+    }
+  }
+  
+  // Final fallback
+  if (landingX === null) {
+    landingX = lastKnownX || width / 2;
+    console.log('[AI] X: fallback lastKnownX:', Math.round(landingX));
+  }
+  
+  console.log('[AI] Final: frame', landingFrame, 'x:', Math.round(landingX));
 
   // Normalize landing X to 0..1
   const landingXNorm = landingX !== null ? landingX / width : null;
