@@ -374,25 +374,31 @@ export async function analyzeJump(frames, onProgress = () => {}) {
         }
         
         if (moundCluster) {
-          // Find the PEAK DENSITY column within the mound cluster
-          // The mound is a concentrated bright spot — its center has the most pixels
-          let peakCol = moundCluster.start;
-          let peakCount = 0;
-          for (let x = moundCluster.start; x <= moundCluster.end; x++) {
-            if (colProfile[x] > peakCount) {
-              peakCount = colProfile[x];
-              peakCol = x;
-            }
+          // The mound is at the edge of this cluster CLOSEST to the main wake
+          // (not the peak density, which might be a boat or other object)
+          // Use centroid of the 30% of the cluster nearest the main wake
+          const isLeftOfWake = moundCluster.end < mainWake.start;
+          let nearStart, nearEnd;
+          if (isLeftOfWake) {
+            // Cluster is LEFT of wake — mound is at the RIGHT end
+            nearStart = Math.round(moundCluster.end - moundCluster.width * 0.3);
+            nearEnd = moundCluster.end;
+          } else {
+            // Cluster is RIGHT of wake — mound is at the LEFT end
+            nearStart = moundCluster.start;
+            nearEnd = Math.round(moundCluster.start + moundCluster.width * 0.3);
           }
-          // Use weighted centroid of columns around the peak (±20 cols)
+          nearStart = Math.max(nearStart, moundCluster.start);
+          nearEnd = Math.min(nearEnd, moundCluster.end);
+          
           let sumX = 0, sumW = 0;
-          for (let x = Math.max(moundCluster.start, peakCol - 20); x <= Math.min(moundCluster.end, peakCol + 20); x++) {
+          for (let x = nearStart; x <= nearEnd; x++) {
             sumX += x * colProfile[x];
             sumW += colProfile[x];
           }
-          landingX = sumW > 0 ? sumX / sumW : peakCol;
+          landingX = sumW > 0 ? sumX / sumW : (nearStart + nearEnd) / 2;
           console.log('[AI] X: mound cluster [', moundCluster.start, '-', moundCluster.end, 
-            '] peakCol:', peakCol, '→ landingX:', Math.round(landingX));
+            '] wake-facing range:', nearStart, '-', nearEnd, '→ landingX:', Math.round(landingX));
         } else {
           // No adjacent cluster found — use edge of main wake closest to frame edge
           // (The mound is at the beginning of the trail)
