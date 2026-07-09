@@ -198,6 +198,7 @@ export async function analyzeJump(frames, onProgress = () => {}) {
   
   let landingFrame = null;
   let landingX = null;
+  let rampIsRight = null;
   
   const safeContactFrame = initialContactFrame || Math.floor(totalFrames * 0.4);
   landingFrame = Math.min(safeContactFrame + 7, totalFrames - 1);
@@ -205,18 +206,7 @@ export async function analyzeJump(frames, onProgress = () => {}) {
   console.log('[AI] initialContactFrame:', initialContactFrame, 'peakFrame:', peakFrame.frame);
   console.log('[AI] Landing frame (contact+7):', landingFrame);
   
-  // STEP 1: DETECT THE RAMP
-  // The ramp is a triangular structure on either the LEFT or RIGHT side of the frame.
-  // Compare structure variance of left 15% vs right 15% — the side with the ramp
-  // has more visual structure (the ramp triangle).
-  const leftEdgeVar = computeEdgeVariance(bgGray, width, height, 0, Math.floor(width * 0.15), 0, height);
-  const rightEdgeVar = computeEdgeVariance(bgGray, width, height, Math.floor(width * 0.85), width, 0, height);
-  
-  const rampIsRight = rightEdgeVar > leftEdgeVar;
-  
-  console.log('[AI] Ramp detection: leftVar:', Math.round(leftEdgeVar), 
-    'rightVar:', Math.round(rightEdgeVar), '→ ramp is', rampIsRight ? 'RIGHT' : 'LEFT');
-  
+  // Ramp side will be determined from splash data (Step 2)
   // STEP 2: SPLASH-BASED X DETECTION
   // Analyze a later frame where the splash/wake is fully visible
   const splashFrame = Math.min(safeContactFrame + 23, totalFrames - 1);
@@ -289,9 +279,21 @@ export async function analyzeJump(frames, onProgress = () => {}) {
       if (smoothed[x] > peakVal) peakVal = smoothed[x];
     }
     
+    // RAMP SIDE DETECTION from splash data:
+    // The skier lands (small splash) on the ramp side and skis away (bigger splash).
+    // So the side of mainWake with LESS mass = ramp side.
+    const wakeMid = Math.floor((mainWake.start + mainWake.end) / 2);
+    let leftMass = 0, rightMass = 0;
+    for (let x = mainWake.start; x <= mainWake.end; x++) {
+      if (x < wakeMid) leftMass += colProfile[x];
+      else rightMass += colProfile[x];
+    }
+    
+    rampIsRight = rightMass < leftMass; // Less splash = ramp side
     const threshold = peakVal * 0.3;
     
-    console.log('[AI] X: rampSide:', rampIsRight ? 'right' : 'left',
+    console.log('[AI] X: wakeMass left:', leftMass, 'right:', rightMass,
+      '→ rampSide:', rampIsRight ? 'right' : 'left',
       'peak:', peakVal, 'threshold:', Math.round(threshold));
     
     // Scan from ramp side inward — first column above threshold = landing contact
