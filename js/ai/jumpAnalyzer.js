@@ -320,61 +320,68 @@ export async function analyzeJump(frames, onProgress = () => {}) {
   }
   
   // LOCATE RAMP precisely for debug marker
-  // Scan from BOTTOM up on the ramp side. Water is uniform (low gradient).
-  // The ramp is the first STRUCTURE (high gradient) above the water.
-  // It extends ABOVE the normal waterline as a triangle.
+  // Use 2D BLOCK VARIANCE: water blocks have low variance, the ramp has high variance.
+  // Scan from bottom up — the ramp is the FIRST high-variance region above the water.
   let rampMarkerX = 0, rampMarkerY = 0;
   if (rampIsRight !== null) {
-    const searchX1 = rampIsRight ? Math.floor(width * 0.7) : 0;
-    const searchX2 = rampIsRight ? width : Math.floor(width * 0.3);
+    const searchX1 = rampIsRight ? Math.floor(width * 0.65) : 0;
+    const searchX2 = rampIsRight ? width : Math.floor(width * 0.35);
+    const blockSize = 15;
     
-    // For each column, scan from bottom up and find first Y with strong local gradient
-    const firstStructY = new Array(width).fill(0);
-    for (let x = searchX1; x < searchX2; x++) {
-      let foundY = 0; // default: top of frame
-      for (let y = height - 10; y > 10; y--) {
-        // Wider gradient window (±8px) to ignore water ripples
-        const above = bgGray[(y - 8) * width + x];
-        const below = bgGray[(y + 8) * width + x];
-        const gradient = Math.abs(above - below);
-        if (gradient > 100) { // Very high threshold: solid structures only
-          foundY = y;
-          break;
+    // Compute block variance grid
+    const blocks = [];
+    for (let by = height - blockSize; by >= 0; by -= blockSize) {
+      for (let bx = searchX1; bx < searchX2 - blockSize; bx += blockSize) {
+        let sum = 0, sumSq = 0, cnt = 0;
+        for (let dy = 0; dy < blockSize; dy++) {
+          for (let dx = 0; dx < blockSize; dx++) {
+            const v = bgGray[(by + dy) * width + (bx + dx)];
+            sum += v; sumSq += v * v; cnt++;
+          }
         }
-      }
-      firstStructY[x] = foundY;
-    }
-    
-    // Find the median "first structure Y" — this is the normal waterline/shore
-    const sortedY = firstStructY.slice(searchX1, searchX2).filter(y => y > 0).sort((a, b) => a - b);
-    const medianY = sortedY[Math.floor(sortedY.length / 2)] || Math.floor(height * 0.5);
-    
-    // Ramp columns: first structure Y is significantly ABOVE the median (lower Y value)
-    // The ramp sticks up above the normal waterline
-    const rampThreshold = medianY - Math.floor(height * 0.03); // at least 3% above waterline
-    
-    let rampSumX = 0, rampSumY = 0, rampCount = 0;
-    let rampMinY = height;
-    for (let x = searchX1; x < searchX2; x++) {
-      if (firstStructY[x] > 0 && firstStructY[x] < rampThreshold) {
-        rampSumX += x;
-        rampSumY += firstStructY[x];
-        rampCount++;
-        if (firstStructY[x] < rampMinY) rampMinY = firstStructY[x];
+        const mean = sum / cnt;
+        const variance = (sumSq / cnt) - (mean * mean);
+        blocks.push({ x: bx + blockSize / 2, y: by + blockSize / 2, variance });
       }
     }
     
-    if (rampCount > 3) {
-      rampMarkerX = (rampSumX / rampCount) / width;
-      rampMarkerY = rampMinY / height; // top of the ramp
-      console.log('[AI] Ramp located: x=', Math.round(rampSumX / rampCount), 
-        'topY=', rampMinY, 'medianWaterline:', medianY,
-        'rampColumns:', rampCount);
+    // Compute median variance (water baseline)
+    const sortedVar = blocks.map(b => b.variance).sort((a, b) => a - b);
+    const medianVar = sortedVar[Math.floor(sortedVar.length * 0.5)];
+    const highVarThreshold = Math.max(medianVar * 5, 200);
+    
+    // Find high-variance blocks (structures, not water)
+    const structBlocks = blocks.filter(b => b.variance > highVarThreshold);
+    
+    // The ramp = the LOWEST (highest Y) cluster of high-variance blocks
+    // that's below the treeline. Sort by Y descending (bottom first).
+    structBlocks.sort((a, b) => b.y - a.y);
+    
+    console.log('[AI] Ramp search: medianVar:', Math.round(medianVar), 
+      'threshold:', Math.round(highVarThreshold),
+      'structBlocks:', structBlocks.length,
+      'topBlocks:', structBlocks.slice(0, 5).map(b => 
+        `(${Math.round(b.x)},${Math.round(b.y)},v=${Math.round(b.variance)})`).join(' '));
+    
+    if (structBlocks.length > 0) {
+      // Take the bottom-most high-variance blocks (first 10) and find their centroid
+      // These should be the ramp (first structure above water)
+      const rampCandidates = structBlocks.slice(0, Math.min(10, structBlocks.length));
+      let sumX = 0, sumY = 0;
+      for (const b of rampCandidates) {
+        sumX += b.x;
+        sumY += b.y;
+      }
+      rampMarkerX = (sumX / rampCandidates.length) / width;
+      rampMarkerY = (sumY / rampCandidates.length) / height;
+      
+      console.log('[AI] Ramp located: x=', Math.round(sumX / rampCandidates.length),
+        'y=', Math.round(sumY / rampCandidates.length),
+        'from', rampCandidates.length, 'blocks');
     } else {
-      // Fallback: center of ramp side
       rampMarkerX = rampIsRight ? 0.85 : 0.15;
       rampMarkerY = 0.4;
-      console.log('[AI] Ramp: not enough columns found, using fallback');
+      console.log('[AI] Ramp: no high-variance blocks found, using fallback');
     }
   }
   
