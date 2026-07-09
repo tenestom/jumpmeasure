@@ -223,8 +223,12 @@ export async function analyzeJump(frames, onProgress = () => {}) {
   const vertCount = new Array(width).fill(0);
   const vertMaxY = new Array(width).fill(0);
   
-  // Waterline: skier must reach this Y level to be at the water surface
-  const waterlineMinY = Math.floor(height * 0.38);
+  // Waterline Y = same level as the ramp (peakFrame.cy)
+  // The skier at landing has skis at the SAME Y-level as the ramp
+  const rampY = peakFrame.cy;
+  const waterlineTolerance = 40; // ±40px from ramp Y
+  
+  console.log('[AI] Ramp position: x=', Math.round(peakFrame.cx), 'y=', Math.round(rampY));
   
   for (let x = 0; x < width; x++) {
     let minY = skierY2, maxY = skierY1;
@@ -239,8 +243,9 @@ export async function analyzeJump(frames, onProgress = () => {}) {
       }
     }
     vertMaxY[x] = maxY;
-    // ONLY count if changes reach down to the waterline (filters out trees)
-    if (maxY > waterlineMinY && maxY > minY) {
+    // ONLY count if changes reach the ramp's Y-level (±tolerance)
+    // This filters out trees (too high) and deep water changes (too low)
+    if (maxY > (rampY - waterlineTolerance) && maxY > minY) {
       vertExtent[x] = maxY - minY;
     } else {
       vertExtent[x] = 0;
