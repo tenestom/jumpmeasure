@@ -192,118 +192,96 @@ export async function analyzeJump(frames, onProgress = () => {}) {
   }
   if (lastKnownX === null) lastKnownX = peakFrame.cx;
 
-  // Search window: from initial contact to ~1s after
-  // New approach: Use FRAME-TO-FRAME motion in the waterline zone.
-  // The skier MOVES → creates per-column changes between consecutive frames.
-  // Static objects (boat, trees, reflections) DON'T change between frames.
-  
-  const safeContactFrame = initialContactFrame || Math.floor(totalFrames * 0.4);
-  const searchStart = Math.max(1, safeContactFrame - 5);
-  const searchEnd = Math.min(totalFrames - 1, safeContactFrame + 30);
-  
-  // Waterline Y zone
-  const skiContactY = Math.floor(height * 0.42);
-  const motionTop = Math.floor(height * 0.25);    // Include some air above waterline
-  const motionBottom = Math.floor(height * 0.50);  // Below waterline
-  
-  console.log('[AI] initialContactFrame:', initialContactFrame, 'peakFrame:', peakFrame.frame);
-  console.log('[AI] Motion tracking: searchStart:', searchStart, 'searchEnd:', searchEnd);
+  // NEW APPROACH: Extrapolate the FLIGHT TRAJECTORY to predict landing.
+  // During flight, the blob tracker has good data (skier against sky = high contrast).
+  // Fit cx(frame) linear and cy(frame) quadratic, extrapolate to waterline.
   
   let landingFrame = null;
   let landingX = null;
   
-  const motionTrack = [];
-  
-  for (let f = searchStart; f <= searchEnd; f++) {
-    const gray = toGrayscale(frames[f]);
-    const prevGray = toGrayscale(frames[f - 1]);
-    
-    // Per-column motion score: sum of |frame - prevFrame| for changed pixels
-    const motionProfile = new Array(width).fill(0);
-    
-    for (let x = 0; x < width; x++) {
-      let motionSum = 0;
-      for (let y = motionTop; y < motionBottom; y++) {
-        const idx = y * width + x;
-        const diff = Math.abs(gray[idx] - prevGray[idx]);
-        if (diff > 15) motionSum += diff;
-      }
-      motionProfile[x] = motionSum;
+  // Collect reliable flight data (detected frames between peak and contact)
+  const flightData = [];
+  for (let f = peakFrame.frame; f <= (initialContactFrame || totalFrames - 1); f++) {
+    if (f < trackingData.length && trackingData[f] && trackingData[f].detected) {
+      flightData.push({ frame: f, cx: trackingData[f].cx, cy: trackingData[f].cy });
     }
-    
-    // CANCEL CAMERA SHAKE: subtract the median motion per column
-    // Camera shake = uniform baseline everywhere. Skier = extra peak above baseline.
-    const sortedMotion = [...motionProfile].sort((a, b) => a - b);
-    const medianMotion = sortedMotion[Math.floor(width * 0.5)];
-    
-    const normalizedProfile = new Array(width).fill(0);
-    for (let x = 0; x < width; x++) {
-      normalizedProfile[x] = Math.max(0, motionProfile[x] - medianMotion);
-    }
-    
-    // Smooth with 20px window
-    const smoothMotion = new Array(width).fill(0);
-    for (let x = 10; x < width - 10; x++) {
-      let sum = 0;
-      for (let dx = -10; dx <= 10; dx++) sum += normalizedProfile[x + dx];
-      smoothMotion[x] = sum;
-    }
-    
-    // Find the peak NORMALIZED motion column (= skier, not camera shake)
-    let bestX = 0, bestVal = 0;
-    for (let x = 0; x < width; x++) {
-      if (smoothMotion[x] > bestVal) {
-        bestVal = smoothMotion[x];
-        bestX = x;
-      }
-    }
-    
-    // Total normalized motion (how much extra motion above baseline)
-    let totalExtra = 0;
-    for (let x = 0; x < width; x++) totalExtra += normalizedProfile[x];
-    
-    motionTrack.push({ frame: f, x: bestX, motionPeak: bestVal, totalExtra, medianMotion });
   }
   
-  // Log motion track
-  console.log('[AI] motionTrack:', motionTrack.map(s => 
-    `f${s.frame}:x=${s.x},peak=${Math.round(s.motionPeak)},extra=${Math.round(s.totalExtra)},median=${Math.round(s.medianMotion)}`
-  ).join(' | '));
+  console.log('[AI] initialContactFrame:', initialContactFrame, 'peakFrame:', peakFrame.frame);
+  console.log('[AI] Flight data points:', flightData.length, 
+    'range: f' + (flightData.length > 0 ? flightData[0].frame : '?') + 
+    '-f' + (flightData.length > 0 ? flightData[flightData.length - 1].frame : '?'));
   
-  // Find the landing frame: look for consistent X in 2+ consecutive frames
-  // AFTER initialContactFrame (can't land before contact!)
-  
-  for (let i = 1; i < motionTrack.length; i++) {
-    const a = motionTrack[i - 1], b = motionTrack[i];
+  if (flightData.length >= 3) {
+    // Log flight trajectory
+    console.log('[AI] flightTrack:', flightData.map(d => 
+      `f${d.frame}:x=${Math.round(d.cx)},y=${Math.round(d.cy)}`
+    ).join(' | '));
     
-    // Must be AFTER contact
-    if (a.frame < safeContactFrame) continue;
+    // Fit linear regression for X: cx = a*frame + b
+    // Use the LAST portion of flight (descent phase, most relevant for landing)
+    const useData = flightData.slice(-Math.min(flightData.length, 15));
     
-    // Both frames have significant motion peak
-    if (a.motionPeak > 500 && b.motionPeak > 500) {
-      // X positions are consistent (within ±80px)
-      const xSpread = Math.abs(a.x - b.x);
+    const n = useData.length;
+    let sumF = 0, sumX = 0, sumY = 0, sumFF = 0, sumFX = 0, sumFY = 0;
+    let sumFFF = 0, sumFFFF = 0, sumFFY = 0;
+    
+    for (const d of useData) {
+      sumF += d.frame;
+      sumX += d.cx;
+      sumY += d.cy;
+      sumFF += d.frame * d.frame;
+      sumFX += d.frame * d.cx;
+      sumFY += d.frame * d.cy;
+      sumFFF += d.frame * d.frame * d.frame;
+      sumFFFF += d.frame * d.frame * d.frame * d.frame;
+      sumFFY += d.frame * d.frame * d.cy;
+    }
+    
+    // Linear fit for X: cx = aX * frame + bX
+    const denomX = n * sumFF - sumF * sumF;
+    const aX = denomX !== 0 ? (n * sumFX - sumF * sumX) / denomX : 0;
+    const bX = (sumX - aX * sumF) / n;
+    
+    // Quadratic fit for Y: cy = aY * frame^2 + bY * frame + cY
+    // Using normal equations for quadratic
+    // Simplified: just use the last few points to estimate descent rate
+    const lastPoint = useData[useData.length - 1];
+    const midPoint = useData[Math.floor(useData.length / 2)];
+    const firstPoint = useData[0];
+    
+    // Linear descent rate for Y (simpler, more robust than quadratic)
+    const descentRate = n > 1 ? (lastPoint.cy - firstPoint.cy) / (lastPoint.frame - firstPoint.frame) : 0;
+    
+    console.log('[AI] Trajectory fit: aX:', aX.toFixed(2), 'bX:', bX.toFixed(0),
+      'descentRate:', descentRate.toFixed(2), 'lastCy:', Math.round(lastPoint.cy));
+    
+    // Extrapolate: find the frame where cy reaches the waterline
+    const landingWaterlineY = height * 0.48; // Where skis touch water
+    
+    if (descentRate > 0 && lastPoint.cy < landingWaterlineY) {
+      // Frames until waterline contact
+      const framesToContact = (landingWaterlineY - lastPoint.cy) / descentRate;
+      const predictedFrame = Math.round(lastPoint.frame + framesToContact);
+      const predictedX = aX * predictedFrame + bX;
       
-      if (xSpread < 80) {
-        const xAvg = Math.round((a.x + b.x) / 2);
-        landingFrame = a.frame;
-        landingX = xAvg;
-        console.log('[AI] Landing (consistent motion): frame', landingFrame, 'x:', landingX,
-          'xSpread:', xSpread, 'peaks:', Math.round(a.motionPeak), Math.round(b.motionPeak));
-        break;
-      }
+      landingFrame = Math.min(predictedFrame, totalFrames - 1);
+      landingX = Math.max(0, Math.min(width - 1, predictedX));
+      
+      console.log('[AI] Predicted landing: frame', landingFrame, 'x:', Math.round(landingX),
+        'framesToContact:', framesToContact.toFixed(1),
+        'waterlineY:', Math.round(landingWaterlineY));
+    } else {
+      // Fallback: use last known position
+      landingFrame = lastPoint.frame + 5;
+      landingX = lastPoint.cx;
+      console.log('[AI] Landing fallback (no descent): frame', landingFrame, 'x:', Math.round(landingX));
     }
-  }
-  
-  // Fallback: frame with highest motion peak
-  if (landingFrame === null && motionTrack.length > 0) {
-    const best = motionTrack.reduce((a, b) => a.motionPeak > b.motionPeak ? a : b);
-    if (best.motionPeak > 100) {
-      landingFrame = best.frame;
-      landingX = best.x;
-      console.log('[AI] Landing (fallback peak motion): frame', landingFrame, 'x:', landingX,
-        'motionPeak:', best.motionPeak);
-    }
+  } else {
+    // Not enough flight data — use contact frame and lastKnownX
+    landingFrame = (initialContactFrame || Math.floor(totalFrames * 0.5)) + 5;
+    landingX = lastKnownX || width / 2;
+    console.log('[AI] Landing fallback (no flight data): frame', landingFrame, 'x:', Math.round(landingX));
   }
 
   // Normalize landing X to 0..1
