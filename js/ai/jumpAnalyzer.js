@@ -186,7 +186,8 @@ export async function analyzeJump(frames, onProgress = () => {}) {
 
   // Get last known jumper X near contact for search region
   let lastKnownX = null;
-  for (const t of trackingData.slice(Math.max(0, initialContactFrame - 10), initialContactFrame + 1)) {
+  const contactIdx = initialContactFrame || 0;
+  for (const t of trackingData.slice(Math.max(0, contactIdx - 10), contactIdx + 1)) {
     if (t.detected) lastKnownX = t.cx;
   }
   if (lastKnownX === null) lastKnownX = peakFrame.cx;
@@ -198,8 +199,9 @@ export async function analyzeJump(frames, onProgress = () => {}) {
   // This gives us BOTH the frame AND the X position.
   
   // Search window: start before initial contact, scan until well after
-  const searchStart = Math.max(0, initialContactFrame - 5);
-  const searchEnd = Math.min(totalFrames - 1, initialContactFrame + 30);
+  const safeContactFrame = initialContactFrame || Math.floor(totalFrames * 0.4);
+  const searchStart = Math.max(0, safeContactFrame - 5);
+  const searchEnd = Math.min(totalFrames - 1, safeContactFrame + 30);
   
   // Waterline Y zone (where skis meet water)
   const waterlineY = Math.floor(height * 0.42);
@@ -220,7 +222,7 @@ export async function analyzeJump(frames, onProgress = () => {}) {
     const gray = toGrayscale(frames[f]);
     
     // Build column "darkness" profile — pixels DARKER than background (skier is dark)
-    const darkProfile = new Array(width).fill(0);
+    const darkProfile = new Array(width).fill(null).map(() => ({ count: 0, lowestY: 0 }));
     for (let x = 0; x < width; x++) {
       let darkCount = 0;
       let lowestDarkY = 0;
