@@ -378,7 +378,17 @@ export async function analyzeJump(frames, onProgress = () => {}) {
   
   // For each column: find highest Y with diff > threshold (= top of motion)
   const verticalExtent = new Array(width).fill(0);
-  const diffThreshold = 30;
+  const diffThreshold = 15; // Low threshold: dark skier vs dark trees
+  
+  // Debug: log diff values at predicted skier position
+  const debugX = Math.round(predX);
+  let debugDiffs = [];
+  for (let y = Math.max(0, rampWaterY - Math.floor(height * 0.15)); y < rampWaterY; y++) {
+    debugDiffs.push(landDiff[y * width + debugX]);
+  }
+  console.log('[AI] Diff at predX=', debugX, 'from y=', 
+    Math.max(0, rampWaterY - Math.floor(height * 0.15)), 'to y=', rampWaterY,
+    'max:', Math.max(...debugDiffs), 'vals:', debugDiffs.slice(0, 20).join(','));
   
   for (let x = searchXStart; x < searchXEnd; x++) {
     let topY = rampWaterY; // default: no vertical extent
@@ -401,7 +411,7 @@ export async function analyzeJump(frames, onProgress = () => {}) {
   
   // Find clusters of columns with significant vertical extent
   // The skier = columns that extend significantly above waterline
-  const minVertExtent = Math.floor(height * 0.03); // at least 3% of frame height
+  const minVertExtent = Math.floor(height * 0.015); // at least 1.5% of frame height
   const skierClusters = [];
   cStart = -1;
   for (let x = searchXStart; x < searchXEnd; x++) {
