@@ -337,7 +337,7 @@ export async function analyzeJump(frames, onProgress = () => {}) {
         const above = bgGray[(y - 8) * width + x];
         const below = bgGray[(y + 8) * width + x];
         const gradient = Math.abs(above - below);
-        if (gradient > 60) { // High threshold: only real structures, not waves
+        if (gradient > 100) { // Very high threshold: solid structures only
           foundY = y;
           break;
         }
