@@ -221,6 +221,10 @@ export async function analyzeJump(frames, onProgress = () => {}) {
   // For each column: find the vertical extent of significantly changed pixels
   const vertExtent = new Array(width).fill(0);
   const vertCount = new Array(width).fill(0);
+  const vertMaxY = new Array(width).fill(0);
+  
+  // Waterline: skier must reach this Y level to be at the water surface
+  const waterlineMinY = Math.floor(height * 0.38);
   
   for (let x = 0; x < width; x++) {
     let minY = skierY2, maxY = skierY1;
@@ -234,7 +238,13 @@ export async function analyzeJump(frames, onProgress = () => {}) {
         count++;
       }
     }
-    vertExtent[x] = maxY > minY ? (maxY - minY) : 0;
+    vertMaxY[x] = maxY;
+    // ONLY count if changes reach down to the waterline (filters out trees)
+    if (maxY > waterlineMinY && maxY > minY) {
+      vertExtent[x] = maxY - minY;
+    } else {
+      vertExtent[x] = 0;
+    }
     vertCount[x] = count;
   }
   
