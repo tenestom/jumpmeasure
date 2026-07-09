@@ -345,53 +345,113 @@ export async function analyzeJump(frames, onProgress = () => {}) {
     }
   }
   
-  // STEP 2: CONSTRAINED BLOB SEARCH AT LANDING FRAME
-  // The global blob at frame 88 merges skier+boat+wake into one giant blob.
-  // Instead: use the last known position from flight (frame ~81) to constrain
-  // the search area. Look for the skier blob ONLY near the predicted position.
+  // STEP 2: FIND SKIER USING VERTICAL PROFILE
+  // The skier is a standing person — their diff extends HIGH ABOVE the waterline.
+  // Wake/splash only creates diff AT the waterline (flat).
+  // For each column: measure how high above ramp Y the diff extends.
+  // Columns with tall vertical extent = the skier.
   let blobBox = null;
   
-  // Get last known position from the clean flight phase
+  // Get predicted X from flight phase (for search zone)
   let predX = lastKnownX || (peakFrame ? peakFrame.cx : width / 2);
-  let predY = peakFrame ? peakFrame.cy : Math.floor(height * 0.3);
-  // Also check frames closer to landing for better prediction
   for (let f = Math.max(0, safeContactFrame - 5); f <= safeContactFrame; f++) {
     if (f < trackingData.length && trackingData[f].detected && trackingData[f].area < 5000) {
       predX = trackingData[f].cx;
-      predY = trackingData[f].cy;
     }
   }
   
-  console.log('[AI] Predicted skier position from flight: x=', predX, 'y=', predY);
-  
-  // Re-detect blob at landing frame in constrained window around predicted position
-  const margin = Math.floor(width * 0.1); // ±10% of frame width
-  const marginY = Math.floor(height * 0.15); // ±15% of frame height
-  const cropX1 = Math.max(0, predX - margin);
-  const cropX2 = Math.min(width, predX + margin);
-  const cropY1 = Math.max(0, predY - marginY);
-  const cropY2 = Math.min(height, predY + marginY);
-  
+  // Compute diff for landing frame
   const landGray = toGrayscale(frames[landingFrame]);
   const landDiff = new Uint8Array(width * height);
   for (let i = 0; i < landGray.length; i++) {
     landDiff[i] = Math.min(255, Math.abs(landGray[i] - bgGray[i]));
   }
   
-  // Find largest blob ONLY within the constrained window
-  const constrainedBlob = findLargestBlob(landDiff, width, height, cropY1, cropY2, 25, cropX1, cropX2);
+  // Use ramp Y as waterline reference. If no ramp found, estimate from frame.
+  const waterlineY = rampNativeY || Math.floor(height * 0.30);
   
-  if (constrainedBlob.detected) {
-    landingX = constrainedBlob.cx;
+  // Search zone: exclude the ramp, search from predicted position outward
+  const rampStart = rampNativeX ? (rampIsRight ? rampNativeX - 30 : 0) : width;
+  const rampEnd = rampNativeX ? (rampIsRight ? width : rampNativeX + 30) : 0;
+  const searchXStart = rampIsRight ? 0 : rampEnd;
+  const searchXEnd = rampIsRight ? rampStart : width;
+  
+  // For each column: find highest Y with diff > threshold (= top of motion)
+  const verticalExtent = new Array(width).fill(0);
+  const diffThreshold = 30;
+  
+  for (let x = searchXStart; x < searchXEnd; x++) {
+    let topY = waterlineY; // default: no vertical extent
+    for (let y = Math.max(0, waterlineY - Math.floor(height * 0.2)); y < waterlineY; y++) {
+      if (landDiff[y * width + x] > diffThreshold) {
+        topY = y;
+        break;
+      }
+    }
+    verticalExtent[x] = waterlineY - topY; // how many pixels above waterline
+  }
+  
+  // Smooth vertical extent
+  const smoothVert = new Array(width).fill(0);
+  for (let x = searchXStart + 3; x < searchXEnd - 3; x++) {
+    let sum = 0;
+    for (let dx = -3; dx <= 3; dx++) sum += verticalExtent[x + dx];
+    smoothVert[x] = sum / 7;
+  }
+  
+  // Find clusters of columns with significant vertical extent
+  // The skier = columns that extend significantly above waterline
+  const minVertExtent = Math.floor(height * 0.03); // at least 3% of frame height
+  const skierClusters = [];
+  let cStart = -1;
+  for (let x = searchXStart; x < searchXEnd; x++) {
+    if (smoothVert[x] > minVertExtent) {
+      if (cStart === -1) cStart = x;
+    } else {
+      if (cStart !== -1) {
+        const w = x - cStart;
+        if (w >= 5 && w <= 150) { // Skier is narrow (~10-80px wide)
+          const cx = Math.round((cStart + x - 1) / 2);
+          const distToPred = Math.abs(cx - predX);
+          // Find max vertical extent in this cluster
+          let maxVE = 0;
+          for (let xx = cStart; xx < x; xx++) {
+            if (smoothVert[xx] > maxVE) maxVE = smoothVert[xx];
+          }
+          skierClusters.push({ start: cStart, end: x - 1, width: w, cx, distToPred, maxVE });
+        }
+        cStart = -1;
+      }
+    }
+  }
+  
+  console.log('[AI] Vertical profile: waterlineY:', waterlineY, 'minExtent:', minVertExtent,
+    'predX:', predX, 'clusters:', skierClusters.map(c => 
+      `[${c.start}-${c.end}](w=${c.width},cx=${c.cx},ve=${Math.round(c.maxVE)},dist=${c.distToPred})`).join(' '));
+  
+  if (skierClusters.length > 0) {
+    // Pick the cluster closest to the predicted position from flight
+    const skierCluster = skierClusters.reduce((a, b) => 
+      a.distToPred < b.distToPred ? a : b);
+    
+    landingX = skierCluster.cx;
+    
+    // Build blobBox for visualization
+    let topY = waterlineY;
+    for (let xx = skierCluster.start; xx <= skierCluster.end; xx++) {
+      const extent = verticalExtent[xx];
+      if (waterlineY - extent < topY) topY = waterlineY - extent;
+    }
     blobBox = {
-      x: constrainedBlob.bbox.x / width,
-      y: constrainedBlob.bbox.y / height,
-      w: constrainedBlob.bbox.w / width,
-      h: constrainedBlob.bbox.h / height
+      x: skierCluster.start / width,
+      y: topY / height,
+      w: skierCluster.width / width,
+      h: (waterlineY - topY + 20) / height
     };
-    console.log('[AI] Skier found in constrained search: x=', landingX,
-      'cy=', constrainedBlob.cy, 'area=', constrainedBlob.area,
-      'bbox:', JSON.stringify(constrainedBlob.bbox));
+    
+    console.log('[AI] Skier found: x=', landingX, 
+      'cluster:', skierCluster.start, '-', skierCluster.end,
+      'width:', skierCluster.width, 'vertExtent:', Math.round(skierCluster.maxVE));
   }
   
   // Fallback
