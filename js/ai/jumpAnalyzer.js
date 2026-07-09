@@ -345,22 +345,53 @@ export async function analyzeJump(frames, onProgress = () => {}) {
     }
   }
   
-  // STEP 2: USE BLOB TRACKER'S POSITION AT LANDING FRAME
-  // The blob tracker already found the skier throughout the video.
-  // At the landing frame, the blob's cx = the skier's X position.
-  const landingBlob = trackingData[landingFrame];
+  // STEP 2: CONSTRAINED BLOB SEARCH AT LANDING FRAME
+  // The global blob at frame 88 merges skier+boat+wake into one giant blob.
+  // Instead: use the last known position from flight (frame ~81) to constrain
+  // the search area. Look for the skier blob ONLY near the predicted position.
   let blobBox = null;
-  if (landingBlob && landingBlob.detected) {
-    landingX = landingBlob.cx;
+  
+  // Get last known position from the clean flight phase
+  let predX = lastKnownX || (peakFrame ? peakFrame.cx : width / 2);
+  let predY = peakFrame ? peakFrame.cy : Math.floor(height * 0.3);
+  // Also check frames closer to landing for better prediction
+  for (let f = Math.max(0, safeContactFrame - 5); f <= safeContactFrame; f++) {
+    if (f < trackingData.length && trackingData[f].detected && trackingData[f].area < 5000) {
+      predX = trackingData[f].cx;
+      predY = trackingData[f].cy;
+    }
+  }
+  
+  console.log('[AI] Predicted skier position from flight: x=', predX, 'y=', predY);
+  
+  // Re-detect blob at landing frame in constrained window around predicted position
+  const margin = Math.floor(width * 0.1); // ±10% of frame width
+  const marginY = Math.floor(height * 0.15); // ±15% of frame height
+  const cropX1 = Math.max(0, predX - margin);
+  const cropX2 = Math.min(width, predX + margin);
+  const cropY1 = Math.max(0, predY - marginY);
+  const cropY2 = Math.min(height, predY + marginY);
+  
+  const landGray = toGrayscale(frames[landingFrame]);
+  const landDiff = new Uint8Array(width * height);
+  for (let i = 0; i < landGray.length; i++) {
+    landDiff[i] = Math.min(255, Math.abs(landGray[i] - bgGray[i]));
+  }
+  
+  // Find largest blob ONLY within the constrained window
+  const constrainedBlob = findLargestBlob(landDiff, width, height, cropY1, cropY2, 25, cropX1, cropX2);
+  
+  if (constrainedBlob.detected) {
+    landingX = constrainedBlob.cx;
     blobBox = {
-      x: landingBlob.bbox.x / width,
-      y: landingBlob.bbox.y / height,
-      w: landingBlob.bbox.w / width,
-      h: landingBlob.bbox.h / height
+      x: constrainedBlob.bbox.x / width,
+      y: constrainedBlob.bbox.y / height,
+      w: constrainedBlob.bbox.w / width,
+      h: constrainedBlob.bbox.h / height
     };
-    console.log('[AI] Skier from blob tracker: x=', landingX, 
-      'cx=', landingBlob.cx, 'cy=', landingBlob.cy,
-      'bbox:', JSON.stringify(landingBlob.bbox));
+    console.log('[AI] Skier found in constrained search: x=', landingX,
+      'cy=', constrainedBlob.cy, 'area=', constrainedBlob.area,
+      'bbox:', JSON.stringify(constrainedBlob.bbox));
   }
   
   // Fallback
@@ -458,19 +489,20 @@ function toGrayscale(imageData) {
  * Find the largest motion blob in a region of the difference image.
  * Uses a simple connected-component approach via flood fill.
  */
-function findLargestBlob(diff, width, height, roiTop, roiBottom, threshold) {
+function findLargestBlob(diff, width, height, roiTop, roiBottom, threshold, roiLeft = 0, roiRight = null) {
+  if (roiRight === null) roiRight = width;
   // Threshold the diff image in the ROI
   const visited = new Uint8Array(width * height);
   
   let bestBlob = { detected: false, cx: 0, cy: 0, area: 0, top: height, bbox: null };
   
   for (let y = roiTop; y < roiBottom; y++) {
-    for (let x = 0; x < width; x++) {
+    for (let x = roiLeft; x < roiRight; x++) {
       const idx = y * width + x;
       if (visited[idx] || diff[idx] < threshold) continue;
       
-      // Flood fill to find connected component
-      const component = floodFill(diff, visited, width, height, x, y, threshold, roiTop, roiBottom);
+      // Flood fill to find connected component (constrained to ROI)
+      const component = floodFill(diff, visited, width, height, x, y, threshold, roiTop, roiBottom, roiLeft, roiRight);
       
       if (component.area > bestBlob.area) {
         // Filter out very flat/wide shapes (waves, wake)
@@ -497,7 +529,8 @@ function findLargestBlob(diff, width, height, roiTop, roiBottom, threshold) {
 /**
  * Simple flood fill to find connected components.
  */
-function floodFill(diff, visited, width, height, startX, startY, threshold, roiTop, roiBottom) {
+function floodFill(diff, visited, width, height, startX, startY, threshold, roiTop, roiBottom, roiLeft = 0, roiRight = null) {
+  if (roiRight === null) roiRight = width;
   const stack = [[startX, startY]];
   let sumX = 0, sumY = 0, count = 0;
   let minX = startX, maxX = startX, minY = startY, maxY = startY;
@@ -506,7 +539,7 @@ function floodFill(diff, visited, width, height, startX, startY, threshold, roiT
     const [x, y] = stack.pop();
     const idx = y * width + x;
     
-    if (x < 0 || x >= width || y < roiTop || y >= roiBottom) continue;
+    if (x < roiLeft || x >= roiRight || y < roiTop || y >= roiBottom) continue;
     if (visited[idx]) continue;
     if (diff[idx] < threshold) continue;
     
