@@ -320,44 +320,62 @@ export async function analyzeJump(frames, onProgress = () => {}) {
   }
   
   // LOCATE RAMP precisely for debug marker
-  // On the ramp side, find the column with highest vertical variance
-  // (sky→ramp→water = high variance vs sky→water = lower variance)
+  // Scan from BOTTOM up on the ramp side. Water is uniform (low gradient).
+  // The ramp is the first STRUCTURE (high gradient) above the water.
+  // It extends ABOVE the normal waterline as a triangle.
   let rampMarkerX = 0, rampMarkerY = 0;
   if (rampIsRight !== null) {
     const searchX1 = rampIsRight ? Math.floor(width * 0.7) : 0;
     const searchX2 = rampIsRight ? width : Math.floor(width * 0.3);
     
-    let bestCol = searchX1, bestVar = 0;
+    // For each column, scan from bottom up and find first Y with high local gradient
+    const firstStructY = new Array(width).fill(0);
     for (let x = searchX1; x < searchX2; x++) {
-      let sum = 0, sumSq = 0, cnt = 0;
-      for (let y = 0; y < height; y++) {
-        const v = bgGray[y * width + x];
-        sum += v; sumSq += v * v; cnt++;
+      let foundY = 0; // default: top of frame (no structure found = shoreline)
+      for (let y = height - 5; y > 5; y--) {
+        // Local vertical gradient: difference between pixels above and below
+        const above = bgGray[(y - 3) * width + x];
+        const below = bgGray[(y + 3) * width + x];
+        const gradient = Math.abs(above - below);
+        if (gradient > 25) {
+          foundY = y;
+          break;
+        }
       }
-      const mean = sum / cnt;
-      const variance = (sumSq / cnt) - (mean * mean);
-      if (variance > bestVar) { bestVar = variance; bestCol = x; }
+      firstStructY[x] = foundY;
     }
     
-    // Find ramp Y: on bestCol, find topmost pixel significantly different from sky
-    // Sky = average of top 10 pixels
-    let skyVal = 0;
-    for (let y = 0; y < 10; y++) skyVal += bgGray[y * width + bestCol];
-    skyVal /= 10;
+    // Find the median "first structure Y" — this is the normal waterline/shore
+    const sortedY = firstStructY.slice(searchX1, searchX2).filter(y => y > 0).sort((a, b) => a - b);
+    const medianY = sortedY[Math.floor(sortedY.length / 2)] || Math.floor(height * 0.5);
     
-    let rampTopY = Math.floor(height * 0.5); // fallback
-    for (let y = 0; y < height; y++) {
-      if (Math.abs(bgGray[y * width + bestCol] - skyVal) > 30) {
-        rampTopY = y;
-        break;
+    // Ramp columns: first structure Y is significantly ABOVE the median (lower Y value)
+    // The ramp sticks up above the normal waterline
+    const rampThreshold = medianY - Math.floor(height * 0.03); // at least 3% above waterline
+    
+    let rampSumX = 0, rampSumY = 0, rampCount = 0;
+    let rampMinY = height;
+    for (let x = searchX1; x < searchX2; x++) {
+      if (firstStructY[x] > 0 && firstStructY[x] < rampThreshold) {
+        rampSumX += x;
+        rampSumY += firstStructY[x];
+        rampCount++;
+        if (firstStructY[x] < rampMinY) rampMinY = firstStructY[x];
       }
     }
     
-    rampMarkerX = bestCol / width;
-    rampMarkerY = rampTopY / height;
-    
-    console.log('[AI] Ramp located: x=', bestCol, 'y=', rampTopY, 
-      'variance:', Math.round(bestVar));
+    if (rampCount > 3) {
+      rampMarkerX = (rampSumX / rampCount) / width;
+      rampMarkerY = rampMinY / height; // top of the ramp
+      console.log('[AI] Ramp located: x=', Math.round(rampSumX / rampCount), 
+        'topY=', rampMinY, 'medianWaterline:', medianY,
+        'rampColumns:', rampCount);
+    } else {
+      // Fallback: center of ramp side
+      rampMarkerX = rampIsRight ? 0.85 : 0.15;
+      rampMarkerY = 0.4;
+      console.log('[AI] Ramp: not enough columns found, using fallback');
+    }
   }
   
   // Fallback
