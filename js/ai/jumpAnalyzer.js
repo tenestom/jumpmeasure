@@ -477,7 +477,8 @@ export async function analyzeJump(frames, onProgress = () => {}) {
     const skierCluster = skierClusters.reduce((a, b) => 
       a.distToPred < b.distToPred ? a : b);
     
-    landingX = skierCluster.cx;
+    // Use the edge of the cluster CLOSEST to the ramp = rear ski tip
+    landingX = rampIsRight ? skierCluster.end : skierCluster.start;
     
     blobBox = {
       x: skierCluster.start / width,
