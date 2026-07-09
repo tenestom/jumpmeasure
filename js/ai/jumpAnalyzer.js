@@ -226,20 +226,30 @@ export async function analyzeJump(frames, onProgress = () => {}) {
       for (let y = motionTop; y < motionBottom; y++) {
         const idx = y * width + x;
         const diff = Math.abs(gray[idx] - prevGray[idx]);
-        if (diff > 15) motionSum += diff; // Only significant changes
+        if (diff > 15) motionSum += diff;
       }
       motionProfile[x] = motionSum;
     }
     
-    // Smooth with 20px window (skier is ~20-40px wide)
+    // CANCEL CAMERA SHAKE: subtract the median motion per column
+    // Camera shake = uniform baseline everywhere. Skier = extra peak above baseline.
+    const sortedMotion = [...motionProfile].sort((a, b) => a - b);
+    const medianMotion = sortedMotion[Math.floor(width * 0.5)];
+    
+    const normalizedProfile = new Array(width).fill(0);
+    for (let x = 0; x < width; x++) {
+      normalizedProfile[x] = Math.max(0, motionProfile[x] - medianMotion);
+    }
+    
+    // Smooth with 20px window
     const smoothMotion = new Array(width).fill(0);
     for (let x = 10; x < width - 10; x++) {
       let sum = 0;
-      for (let dx = -10; dx <= 10; dx++) sum += motionProfile[x + dx];
+      for (let dx = -10; dx <= 10; dx++) sum += normalizedProfile[x + dx];
       smoothMotion[x] = sum;
     }
     
-    // Find the peak motion column (= where the skier is moving)
+    // Find the peak NORMALIZED motion column (= skier, not camera shake)
     let bestX = 0, bestVal = 0;
     for (let x = 0; x < width; x++) {
       if (smoothMotion[x] > bestVal) {
@@ -248,16 +258,16 @@ export async function analyzeJump(frames, onProgress = () => {}) {
       }
     }
     
-    // Also compute total motion in the frame (to detect landing spike)
-    let totalMotion = 0;
-    for (let x = 0; x < width; x++) totalMotion += motionProfile[x];
+    // Total normalized motion (how much extra motion above baseline)
+    let totalExtra = 0;
+    for (let x = 0; x < width; x++) totalExtra += normalizedProfile[x];
     
-    motionTrack.push({ frame: f, x: bestX, motionPeak: bestVal, totalMotion });
+    motionTrack.push({ frame: f, x: bestX, motionPeak: bestVal, totalExtra, medianMotion });
   }
   
   // Log motion track
   console.log('[AI] motionTrack:', motionTrack.map(s => 
-    `f${s.frame}:x=${s.x},peak=${s.motionPeak},total=${s.totalMotion}`
+    `f${s.frame}:x=${s.x},peak=${Math.round(s.motionPeak)},extra=${Math.round(s.totalExtra)},median=${Math.round(s.medianMotion)}`
   ).join(' | '));
   
   // Find the landing frame: look for a consistent X position in 3+ consecutive frames
