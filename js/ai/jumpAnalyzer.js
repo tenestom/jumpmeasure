@@ -193,186 +193,105 @@ export async function analyzeJump(frames, onProgress = () => {}) {
 
   // Search window: from initial contact to ~1s after
   const fps = totalFrames / (totalFrames / 30); // Approximate
-  const searchStart = Math.max(0, initialContactFrame);
+  // New approach: Track the SKIER (dark object, high contrast vs water/sky).
+  // The skis are vertical dark lines. When the ski backs touch the water = landing.
+  // This gives us BOTH the frame AND the X position.
+  
+  // Search window: start before initial contact, scan until well after
+  const searchStart = Math.max(0, initialContactFrame - 5);
   const searchEnd = Math.min(totalFrames - 1, initialContactFrame + 30);
   
-  // Compute frame-to-frame change scores
-  const frameScores = [];
-  let prevGray = toGrayscale(frames[Math.max(0, searchStart - 1)]);
+  // Waterline Y zone (where skis meet water)
+  const waterlineY = Math.floor(height * 0.42);
+  const skierSearchTop = Math.floor(height * 0.15);    // Above waterline (sky/flight zone)
+  const skierSearchBottom = Math.floor(height * 0.48);  // Below waterline slightly
   
-  // Use FULL frame width for search (blob tracker lastKnownX is unreliable)
-  const rx1 = 0;
-  const rx2 = width;
-  const ry1 = Math.max(0, Math.floor(height * 0.35));
-  const ry2 = Math.min(height, Math.floor(height * 0.48));
-
+  console.log('[AI] initialContactFrame:', initialContactFrame, 'peakFrame:', peakFrame.frame);
+  console.log('[AI] Skier tracking: searchStart:', searchStart, 'searchEnd:', searchEnd, 
+    'waterlineY:', waterlineY);
+  
+  let landingFrame = null;
+  let landingX = null;
+  
+  // For each frame, find the skier (darkest column cluster vs background ABOVE waterline)
+  const skierTrack = [];
+  
   for (let f = searchStart; f <= searchEnd; f++) {
     const gray = toGrayscale(frames[f]);
     
-    let changeCount = 0;
-    let brightNewCount = 0;
-    
-    for (let y = ry1; y < ry2; y++) {
-      for (let x = rx1; x < rx2; x++) {
+    // Build column "darkness" profile — pixels DARKER than background (skier is dark)
+    const darkProfile = new Array(width).fill(0);
+    for (let x = 0; x < width; x++) {
+      let darkCount = 0;
+      let lowestDarkY = 0;
+      for (let y = skierSearchTop; y < skierSearchBottom; y++) {
         const idx = y * width + x;
-        const frameDiff = gray[idx] - prevGray[idx];
-        if (frameDiff > 20) changeCount++;
-        if (gray[idx] > 170 && Math.abs(gray[idx] - bgGray[idx]) > 25) brightNewCount++;
+        const darkerThanBg = bgGray[idx] - gray[idx];
+        if (darkerThanBg > 30) { // Significantly darker than background
+          darkCount++;
+          if (y > lowestDarkY) lowestDarkY = y;
+        }
+      }
+      darkProfile[x] = { count: darkCount, lowestY: lowestDarkY };
+    }
+    
+    // Find the column cluster with the most dark pixels (the skier)
+    // Smooth dark counts with 10px window
+    const smoothDark = new Array(width).fill(0);
+    for (let x = 5; x < width - 5; x++) {
+      let sum = 0;
+      for (let dx = -5; dx <= 5; dx++) sum += darkProfile[x + dx].count;
+      smoothDark[x] = sum;
+    }
+    
+    // Find the peak (skier position)
+    let bestX = 0, bestVal = 0;
+    for (let x = 0; x < width; x++) {
+      if (smoothDark[x] > bestVal) {
+        bestVal = smoothDark[x];
+        bestX = x;
       }
     }
     
-    frameScores.push({ frame: f, change: changeCount, bright: brightNewCount });
-    prevGray = gray;
-  }
-
-  // Log diagnostics for debugging
-  console.log('[AI] initialContactFrame:', initialContactFrame, 'peakFrame:', peakFrame.frame);
-  console.log('[AI] frameScores:', frameScores.map(s => `f${s.frame}:ch=${s.change},br=${s.bright}`).join(' | '));
-
-  let landingFrame = null;
-  let landingX = null;
-
-  // Two-phase landing frame detection:
-  // Phase 1: Find the elevated brightness region (where mound exists)
-  // Phase 2: Within that region, find the frame with peak combined score
-  
-  const baselineFrames = frameScores.slice(0, Math.min(8, frameScores.length));
-  const baselineBright = baselineFrames.reduce((s, f) => s + f.bright, 0) / baselineFrames.length;
-  const brightnessThreshold = baselineBright * 1.03; // 3% to find the elevated region
-  
-  console.log('[AI] baselineBright:', Math.round(baselineBright), 'threshold:', Math.round(brightnessThreshold));
-
-  // Phase 1: Find where the elevated region starts (5-frame moving avg)
-  let elevatedStart = null;
-  for (let i = 4; i < frameScores.length; i++) {
-    const window5 = frameScores.slice(i - 4, i + 1);
-    const avgBright = window5.reduce((s, f) => s + f.bright, 0) / 5;
+    // Find the lowest dark pixel in the skier cluster (±40px around peak)
+    let lowestY = 0;
+    let skierCols = 0;
+    for (let x = Math.max(0, bestX - 40); x <= Math.min(width - 1, bestX + 40); x++) {
+      if (darkProfile[x].count > 3) {
+        skierCols++;
+        if (darkProfile[x].lowestY > lowestY) lowestY = darkProfile[x].lowestY;
+      }
+    }
     
-    if (avgBright > brightnessThreshold) {
-      elevatedStart = window5[0].frame; // Start of the elevated region
+    skierTrack.push({ frame: f, x: bestX, lowestY, darkScore: bestVal, cols: skierCols });
+  }
+  
+  // Log skier track
+  console.log('[AI] skierTrack:', skierTrack.map(s => 
+    `f${s.frame}:x=${s.x},lowY=${s.lowestY},dark=${s.darkScore}`
+  ).join(' | '));
+  
+  // Find the frame where the skier's lowest point FIRST reaches the waterline
+  // This is the landing frame (ski backs touch water)
+  for (const entry of skierTrack) {
+    if (entry.lowestY >= waterlineY && entry.darkScore > 50) {
+      landingFrame = entry.frame;
+      landingX = entry.x;
+      console.log('[AI] Landing: frame', landingFrame, 'x:', landingX, 
+        'lowestY:', entry.lowestY, 'waterlineY:', waterlineY);
       break;
     }
   }
-
-  // Phase 2: The mound is most distinct when it FIRST appears
-  // Use the start of the elevated region directly
-  if (elevatedStart !== null) {
-    landingFrame = elevatedStart;
-    console.log('[AI] Landing frame (elevated region start):', landingFrame);
-  }
-
-  // Fallback: frame with highest bright score in late window
-  if (landingFrame === null) {
-    const lateScores = frameScores.filter(s => s.frame >= initialContactFrame + 15);
-    if (lateScores.length > 0) {
-      const best = lateScores.reduce((a, b) => a.bright > b.bright ? a : b);
-      landingFrame = best.frame;
-      console.log('[AI] Landing frame (fallback late peak):', landingFrame);
-    } else if (frameScores.length > 0) {
-      const best = frameScores.reduce((a, b) => a.bright > b.bright ? a : b);
-      landingFrame = best.frame;
-      console.log('[AI] Landing frame (fallback overall peak):', landingFrame);
-    }
-  }
-
-  // Step 7: Find the precise X position of the mound
-  // The skier creates a TRAIL of disturbed water. The mound is at the 
-  // very BEGINNING of this trail (closest to the jump/ramp).
-  // Strategy: Find the LONGEST continuous disturbance (= skier's trail,
-  // not the boat). The mound is at one end — the end with the sharper peak.
-  if (landingFrame !== null) {
-    const landingGray = toGrayscale(frames[landingFrame]);
-    
-    // Build bgDiff column profile (Y band at waterline)
-    const moundRy1 = Math.floor(height * 0.35);
-    const moundRy2 = Math.floor(height * 0.48);
-    const bgDiffProfile = new Array(width).fill(0);
-    
-    for (let x = 0; x < width; x++) {
-      let colSum = 0;
-      for (let y = moundRy1; y < moundRy2; y++) {
-        const idx = y * width + x;
-        const diff = Math.abs(landingGray[idx] - bgGray[idx]);
-        if (diff > 20 && landingGray[idx] > 140) {
-          colSum += diff;
-        }
-      }
-      bgDiffProfile[x] = colSum;
-    }
-    
-    // Smooth with 15px window
-    const smoothed = new Array(width).fill(0);
-    for (let x = 7; x < width - 7; x++) {
-      let sum = 0;
-      for (let dx = -7; dx <= 7; dx++) sum += bgDiffProfile[x + dx];
-      smoothed[x] = sum / 15;
-    }
-    
-    // Threshold: use percentile
-    const sorted = [...smoothed].filter(v => v > 0).sort((a, b) => a - b);
-    const edgeThreshold = sorted[Math.floor(sorted.length * 0.5)] || 50;
-    
-    console.log('[AI] X: edgeThreshold:', Math.round(edgeThreshold));
-    
-    // Find ALL runs of sustained activity
-    const runs = [];
-    let runStart = -1;
-    for (let x = 0; x < width; x++) {
-      if (smoothed[x] > edgeThreshold) {
-        if (runStart === -1) runStart = x;
-      } else {
-        if (runStart !== -1) {
-          runs.push({ start: runStart, end: x - 1, len: x - runStart });
-          runStart = -1;
-        }
-      }
-    }
-    if (runStart !== -1) runs.push({ start: runStart, end: width - 1, len: width - runStart });
-    
-    console.log('[AI] X: runs:', runs.map(r => `[${r.start}-${r.end}](${r.len})`).join(' '));
-    
-    if (runs.length > 0) {
-      // Pick the LONGEST run = skier's trail (not the boat)
-      const longestRun = runs.reduce((a, b) => a.len > b.len ? a : b);
-      
-      console.log('[AI] X: longest run:', longestRun.start, '-', longestRun.end, 'len:', longestRun.len);
-      
-      // The mound is at one end. Check which end has a sharper/higher peak.
-      // The mound creates a bright splash; the far end of the wake just fades.
-      const leftZone = { start: longestRun.start, end: Math.min(longestRun.start + 60, longestRun.end) };
-      const rightZone = { start: Math.max(longestRun.end - 60, longestRun.start), end: longestRun.end };
-      
-      let leftPeak = 0, rightPeak = 0;
-      for (let x = leftZone.start; x <= leftZone.end; x++) {
-        if (smoothed[x] > leftPeak) leftPeak = smoothed[x];
-      }
-      for (let x = rightZone.start; x <= rightZone.end; x++) {
-        if (smoothed[x] > rightPeak) rightPeak = smoothed[x];
-      }
-      
-      console.log('[AI] X: leftPeak:', Math.round(leftPeak), 'rightPeak:', Math.round(rightPeak));
-      
-      // The mound end has the higher peak (splash is bright)
-      const moundIsLeft = leftPeak >= rightPeak;
-      const moundZoneStart = moundIsLeft ? leftZone.start : rightZone.start;
-      const moundZoneEnd = moundIsLeft ? leftZone.end : rightZone.end;
-      
-      // Find the peak column within the mound zone
-      let peakCol = moundZoneStart;
-      let peakVal = 0;
-      for (let x = moundZoneStart; x <= moundZoneEnd; x++) {
-        if (smoothed[x] > peakVal) {
-          peakVal = smoothed[x];
-          peakCol = x;
-        }
-      }
-      
-      landingX = peakCol;
-      console.log('[AI] X: moundSide:', moundIsLeft ? 'left' : 'right', 
-        'peakCol:', peakCol, '→ landingX:', Math.round(landingX));
-    } else {
-      landingX = width / 2;
-      console.log('[AI] X: no runs found, fallback center');
+  
+  // Fallback: if no clear waterline contact, use the frame with the lowest Y
+  if (landingFrame === null && skierTrack.length > 0) {
+    const validEntries = skierTrack.filter(e => e.darkScore > 30);
+    if (validEntries.length > 0) {
+      const bestEntry = validEntries.reduce((a, b) => a.lowestY > b.lowestY ? a : b);
+      landingFrame = bestEntry.frame;
+      landingX = bestEntry.x;
+      console.log('[AI] Landing (fallback lowest Y): frame', landingFrame, 'x:', landingX, 
+        'lowestY:', bestEntry.lowestY);
     }
   }
 
