@@ -206,20 +206,19 @@ export async function analyzeJump(frames, onProgress = () => {}) {
   console.log('[AI] initialContactFrame:', initialContactFrame, 'peakFrame:', peakFrame.frame);
   console.log('[AI] Landing frame (contact+7):', landingFrame);
   
-  // Ramp side will be determined from splash data (Step 2)
-  // STEP 2: SPLASH-BASED X DETECTION
-  // Analyze a later frame where the splash/wake is fully visible
+  // STEP 1: LOCATE RAMP using vertical edge detection at horizon zone
+  // The ramp has STRAIGHT EDGES (triangle sides) that create strong vertical edges.
+  let rampMarkerX = 0, rampMarkerY = 0;
+  let rampNativeX = null, rampNativeY = null;
+  
+  // First determine ramp side from splash data
   const splashFrame = Math.min(safeContactFrame + 23, totalFrames - 1);
   const splashGray = toGrayscale(frames[splashFrame]);
   const preSplashGray = toGrayscale(frames[Math.max(0, splashFrame - 4)]);
   
-  // Waterline zone
   const splashRy1 = Math.floor(height * 0.35);
   const splashRy2 = Math.floor(height * 0.48);
-  
-  // Column profile: bright new pixels at waterline
   const colProfile = new Array(width).fill(0);
-  let totalNewPixels = 0;
   
   for (let y = splashRy1; y < splashRy2; y++) {
     for (let x = 0; x < width; x++) {
@@ -228,109 +227,51 @@ export async function analyzeJump(frames, onProgress = () => {}) {
       const vsBg = splashGray[idx] - bgGray[idx];
       if (vsPreSplash > 30 && vsBg > 30 && splashGray[idx] > 180) {
         colProfile[x]++;
-        totalNewPixels++;
       }
     }
   }
   
-  console.log('[AI] X: splashFrame:', splashFrame, 'totalNewPixels:', totalNewPixels);
-  
-  if (totalNewPixels > 5) {
-    // Find clusters
-    const clusters = [];
-    let cStart = -1;
-    for (let x = 0; x < width; x++) {
-      if (colProfile[x] > 0) {
-        if (cStart === -1) cStart = x;
-      } else {
-        if (cStart !== -1) {
-          let mass = 0;
-          for (let cx = cStart; cx <= x - 1; cx++) mass += colProfile[cx];
-          clusters.push({ start: cStart, end: x - 1, width: x - cStart, mass });
-          cStart = -1;
-        }
+  // Find main wake cluster for ramp side detection
+  const clusters = [];
+  let cStart = -1;
+  for (let x = 0; x < width; x++) {
+    if (colProfile[x] > 0) {
+      if (cStart === -1) cStart = x;
+    } else {
+      if (cStart !== -1) {
+        let mass = 0;
+        for (let cx = cStart; cx <= x - 1; cx++) mass += colProfile[cx];
+        clusters.push({ start: cStart, end: x - 1, mass });
+        cStart = -1;
       }
     }
-    if (cStart !== -1) {
-      let mass = 0;
-      for (let cx = cStart; cx < width; cx++) mass += colProfile[cx];
-      clusters.push({ start: cStart, end: width - 1, width: width - cStart, mass });
-    }
-    
-    console.log('[AI] X: clusters:', clusters.map(c => 
-      `[${c.start}-${c.end}](w=${c.width},m=${c.mass})`).join(' '));
-    
-    // Main wake = largest cluster by mass
+  }
+  if (cStart !== -1) {
+    let mass = 0;
+    for (let cx = cStart; cx < width; cx++) mass += colProfile[cx];
+    clusters.push({ start: cStart, end: width - 1, mass });
+  }
+  
+  if (clusters.length > 0) {
     const mainWake = clusters.reduce((a, b) => a.mass > b.mass ? a : b);
-    
-    console.log('[AI] X: mainWake [', mainWake.start, '-', mainWake.end, '] mass:', mainWake.mass);
-    
-    // Smooth the profile within the main wake
-    const smoothed = new Array(width).fill(0);
-    for (let x = mainWake.start + 5; x <= mainWake.end - 5; x++) {
-      let sum = 0;
-      for (let dx = -5; dx <= 5; dx++) sum += colProfile[x + dx];
-      smoothed[x] = sum;
-    }
-    
-    // Find peak value for threshold
-    let peakVal = 0;
-    for (let x = mainWake.start; x <= mainWake.end; x++) {
-      if (smoothed[x] > peakVal) peakVal = smoothed[x];
-    }
-    
-    // RAMP SIDE DETECTION from splash data:
-    // The skier lands (small splash) on the ramp side and skis away (bigger splash).
-    // So the side of mainWake with LESS mass = ramp side.
     const wakeMid = Math.floor((mainWake.start + mainWake.end) / 2);
     let leftMass = 0, rightMass = 0;
     for (let x = mainWake.start; x <= mainWake.end; x++) {
       if (x < wakeMid) leftMass += colProfile[x];
       else rightMass += colProfile[x];
     }
-    
-    rampIsRight = rightMass < leftMass; // Less splash = ramp side
-    const threshold = peakVal * 0.3;
-    
-    console.log('[AI] X: wakeMass left:', leftMass, 'right:', rightMass,
-      '→ rampSide:', rampIsRight ? 'right' : 'left',
-      'peak:', peakVal, 'threshold:', Math.round(threshold));
-    
-    // Scan from ramp side inward — first column above threshold = landing contact
-    if (rampIsRight) {
-      for (let x = mainWake.end; x >= mainWake.start; x--) {
-        if (smoothed[x] > threshold) {
-          landingX = x;
-          break;
-        }
-      }
-    } else {
-      for (let x = mainWake.start; x <= mainWake.end; x++) {
-        if (smoothed[x] > threshold) {
-          landingX = x;
-          break;
-        }
-      }
-    }
-    
-    if (landingX !== null) {
-      console.log('[AI] X: landing at native', landingX, 
-        'normalized:', (landingX / width).toFixed(4));
-    }
+    rampIsRight = rightMass < leftMass;
+    console.log('[AI] Ramp side: left wake:', leftMass, 'right wake:', rightMass,
+      '→', rampIsRight ? 'RIGHT' : 'LEFT');
   }
   
-  // LOCATE RAMP precisely for debug marker
-  // The ramp has STRAIGHT EDGES (triangle sides) that create strong vertical edges.
-  // Water has organic wave texture with weak/no vertical edges.
-  // Search the horizon zone (y=20-40%) on the ramp side for vertical edges.
-  let rampMarkerX = 0, rampMarkerY = 0;
+  // Find ramp position using vertical edge detection
   if (rampIsRight !== null) {
     const searchX1 = rampIsRight ? Math.floor(width * 0.55) : 0;
     const searchX2 = rampIsRight ? width : Math.floor(width * 0.45);
-    const horizonY1 = Math.floor(height * 0.20);
-    const horizonY2 = Math.floor(height * 0.40);
+    const horizonY1 = Math.floor(height * 0.15);
+    const horizonY2 = Math.floor(height * 0.45);
     
-    // For each column, compute horizontal gradient strength (detects vertical edges)
     const edgeStrength = new Array(width).fill(0);
     for (let x = searchX1 + 2; x < searchX2 - 2; x++) {
       let totalEdge = 0;
@@ -342,7 +283,6 @@ export async function analyzeJump(frames, onProgress = () => {}) {
       edgeStrength[x] = totalEdge;
     }
     
-    // Smooth edge strength
     const smoothEdge = new Array(width).fill(0);
     for (let x = searchX1 + 5; x < searchX2 - 5; x++) {
       let sum = 0;
@@ -350,25 +290,21 @@ export async function analyzeJump(frames, onProgress = () => {}) {
       smoothEdge[x] = sum / 7;
     }
     
-    // Find peak edge columns (strong vertical edges = ramp sides)
     let maxEdge = 0;
     for (let x = searchX1; x < searchX2; x++) {
       if (smoothEdge[x] > maxEdge) maxEdge = smoothEdge[x];
     }
     
-    // Threshold: 30% of peak
     const edgeThreshold = maxEdge * 0.3;
-    
-    // Find clusters of strong-edge columns
     const edgeClusters = [];
-    let cStart = -1;
+    cStart = -1;
     for (let x = searchX1; x < searchX2; x++) {
       if (smoothEdge[x] > edgeThreshold) {
         if (cStart === -1) cStart = x;
       } else {
         if (cStart !== -1) {
           const w = x - cStart;
-          if (w >= 10 && w <= 300) { // Ramp is ~50-200px wide
+          if (w >= 10 && w <= 300) {
             edgeClusters.push({ start: cStart, end: x - 1, width: w, cx: Math.round((cStart + x - 1) / 2) });
           }
           cStart = -1;
@@ -376,19 +312,17 @@ export async function analyzeJump(frames, onProgress = () => {}) {
       }
     }
     
-    console.log('[AI] Ramp edge search: maxEdge:', Math.round(maxEdge), 
-      'threshold:', Math.round(edgeThreshold),
-      'clusters:', edgeClusters.map(c => `[${c.start}-${c.end}](w=${c.width},cx=${c.cx})`).join(' '));
+    console.log('[AI] Ramp edge clusters:', edgeClusters.map(c => 
+      `[${c.start}-${c.end}](w=${c.width},cx=${c.cx})`).join(' '));
     
     if (edgeClusters.length > 0) {
-      // The ramp = the cluster closest to the edge of the frame on the ramp side
       const rampCluster = rampIsRight 
-        ? edgeClusters.reduce((a, b) => a.cx > b.cx ? a : b)  // rightmost
-        : edgeClusters.reduce((a, b) => a.cx < b.cx ? a : b); // leftmost
+        ? edgeClusters.reduce((a, b) => a.cx > b.cx ? a : b)
+        : edgeClusters.reduce((a, b) => a.cx < b.cx ? a : b);
       
-      // Find ramp Y: on the ramp cluster, find the topmost row with strong edges
-      let rampTopY = horizonY2;
-      for (let y = horizonY1; y < horizonY2; y++) {
+      // Find ramp base Y (bottom of the ramp = waterline)
+      let rampBaseY = horizonY2;
+      for (let y = horizonY2; y > horizonY1; y--) {
         let rowEdge = 0;
         for (let x = rampCluster.start; x <= rampCluster.end; x++) {
           const left = bgGray[y * width + (x - 2)];
@@ -396,21 +330,82 @@ export async function analyzeJump(frames, onProgress = () => {}) {
           rowEdge += Math.abs(right - left);
         }
         if (rowEdge > maxEdge * 0.1) {
-          rampTopY = y;
+          rampBaseY = y;
           break;
         }
       }
       
+      rampNativeX = rampCluster.cx;
+      rampNativeY = rampBaseY;
       rampMarkerX = rampCluster.cx / width;
-      rampMarkerY = rampTopY / height;
+      rampMarkerY = rampBaseY / height;
       
-      console.log('[AI] Ramp located: x=', rampCluster.cx, 'y=', rampTopY,
-        'cluster:', rampCluster.start, '-', rampCluster.end, 
-        'width:', rampCluster.width);
-    } else {
-      rampMarkerX = rampIsRight ? 0.85 : 0.15;
-      rampMarkerY = 0.3;
-      console.log('[AI] Ramp: no edge clusters found, using fallback');
+      console.log('[AI] Ramp located: x=', rampCluster.cx, 'baseY=', rampBaseY,
+        'cluster:', rampCluster.start, '-', rampCluster.end);
+    }
+  }
+  
+  // STEP 2: FIND SKIER at ramp's Y level using frame difference
+  // The skier lands at the same Y level as the ramp base.
+  // Compare landing frame with a reference 5 frames earlier.
+  // The closest motion to the ramp = the skier (boat is further away).
+  if (rampNativeX !== null && rampNativeY !== null) {
+    const refIdx = Math.max(0, landingFrame - 5);
+    const landGray = toGrayscale(frames[landingFrame]);
+    const refGray = toGrayscale(frames[refIdx]);
+    
+    // Search band: ramp Y ± tolerance
+    const yTol = Math.floor(height * 0.05);
+    const searchY1 = Math.max(0, rampNativeY - yTol);
+    const searchY2 = Math.min(height - 1, rampNativeY + yTol);
+    
+    // Column profile of motion at ramp Y level
+    const motionProfile = new Array(width).fill(0);
+    for (let x = 0; x < width; x++) {
+      for (let y = searchY1; y <= searchY2; y++) {
+        const idx = y * width + x;
+        const diff = Math.abs(landGray[idx] - refGray[idx]);
+        if (diff > 25) motionProfile[x]++;
+      }
+    }
+    
+    // Exclude the ramp zone itself (ramp doesn't move, but edge artifacts)
+    const rampExcludeStart = rampNativeX - 50;
+    const rampExcludeEnd = rampNativeX + 200;
+    for (let x = Math.max(0, rampExcludeStart); x < Math.min(width, rampExcludeEnd); x++) {
+      motionProfile[x] = 0;
+    }
+    
+    // Find motion clusters
+    const motionClusters = [];
+    cStart = -1;
+    for (let x = 0; x < width; x++) {
+      if (motionProfile[x] > 2) {
+        if (cStart === -1) cStart = x;
+      } else {
+        if (cStart !== -1) {
+          let mass = 0;
+          for (let cx = cStart; cx < x; cx++) mass += motionProfile[cx];
+          const cx = Math.round((cStart + x - 1) / 2);
+          const distToRamp = Math.abs(cx - rampNativeX);
+          motionClusters.push({ start: cStart, end: x - 1, width: x - cStart, mass, cx, distToRamp });
+          cStart = -1;
+        }
+      }
+    }
+    
+    console.log('[AI] Motion at rampY:', motionClusters.map(c => 
+      `[${c.start}-${c.end}](w=${c.width},m=${c.mass},dist=${c.distToRamp})`).join(' '));
+    
+    if (motionClusters.length > 0) {
+      // Skier = closest motion cluster to the ramp
+      const skierCluster = motionClusters.reduce((a, b) => 
+        a.distToRamp < b.distToRamp ? a : b);
+      
+      landingX = skierCluster.cx;
+      console.log('[AI] Skier found: x=', landingX, 
+        'dist to ramp:', skierCluster.distToRamp,
+        'cluster:', skierCluster.start, '-', skierCluster.end);
     }
   }
   
