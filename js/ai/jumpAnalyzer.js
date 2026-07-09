@@ -374,31 +374,47 @@ export async function analyzeJump(frames, onProgress = () => {}) {
         }
         
         if (moundCluster) {
-          // The mound is at the edge of this cluster CLOSEST to the main wake
-          // (not the peak density, which might be a boat or other object)
-          // Use centroid of the 30% of the cluster nearest the main wake
+          // The mound is in this cluster, near the wake but NOT in the transition zone
+          // Split the cluster into zones:
+          //   - Far zone (0-70%): boat, other objects — ignore
+          //   - Mound zone (70-90%): where the mound is — search here
+          //   - Transition zone (90-100%): wake blending — ignore
           const isLeftOfWake = moundCluster.end < mainWake.start;
-          let nearStart, nearEnd;
+          let searchStart, searchEnd;
           if (isLeftOfWake) {
-            // Cluster is LEFT of wake — mound is at the RIGHT end
-            nearStart = Math.round(moundCluster.end - moundCluster.width * 0.3);
-            nearEnd = moundCluster.end;
+            // Cluster LEFT of wake — mound is toward the RIGHT end
+            searchStart = Math.round(moundCluster.start + moundCluster.width * 0.55);
+            searchEnd = Math.round(moundCluster.end - moundCluster.width * 0.10);
           } else {
-            // Cluster is RIGHT of wake — mound is at the LEFT end
-            nearStart = moundCluster.start;
-            nearEnd = Math.round(moundCluster.start + moundCluster.width * 0.3);
+            // Cluster RIGHT of wake — mound is toward the LEFT end
+            searchStart = Math.round(moundCluster.start + moundCluster.width * 0.10);
+            searchEnd = Math.round(moundCluster.start + moundCluster.width * 0.45);
           }
-          nearStart = Math.max(nearStart, moundCluster.start);
-          nearEnd = Math.min(nearEnd, moundCluster.end);
+          searchStart = Math.max(searchStart, moundCluster.start);
+          searchEnd = Math.min(searchEnd, moundCluster.end);
           
+          // Find peak density column in the mound zone
+          let peakCol = searchStart;
+          let peakCount = 0;
+          for (let x = searchStart; x <= searchEnd; x++) {
+            if (colProfile[x] > peakCount) {
+              peakCount = colProfile[x];
+              peakCol = x;
+            }
+          }
+          
+          // Centroid around the peak (±30 cols within search range)
           let sumX = 0, sumW = 0;
-          for (let x = nearStart; x <= nearEnd; x++) {
+          const cStart = Math.max(searchStart, peakCol - 30);
+          const cEnd = Math.min(searchEnd, peakCol + 30);
+          for (let x = cStart; x <= cEnd; x++) {
             sumX += x * colProfile[x];
             sumW += colProfile[x];
           }
-          landingX = sumW > 0 ? sumX / sumW : (nearStart + nearEnd) / 2;
+          landingX = sumW > 0 ? sumX / sumW : peakCol;
           console.log('[AI] X: mound cluster [', moundCluster.start, '-', moundCluster.end, 
-            '] wake-facing range:', nearStart, '-', nearEnd, '→ landingX:', Math.round(landingX));
+            '] searchZone:', searchStart, '-', searchEnd, 'peakCol:', peakCol,
+            '→ landingX:', Math.round(landingX));
         } else {
           // No adjacent cluster found — use edge of main wake closest to frame edge
           // (The mound is at the beginning of the trail)
