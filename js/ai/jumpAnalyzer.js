@@ -328,16 +328,16 @@ export async function analyzeJump(frames, onProgress = () => {}) {
     const searchX1 = rampIsRight ? Math.floor(width * 0.7) : 0;
     const searchX2 = rampIsRight ? width : Math.floor(width * 0.3);
     
-    // For each column, scan from bottom up and find first Y with high local gradient
+    // For each column, scan from bottom up and find first Y with strong local gradient
     const firstStructY = new Array(width).fill(0);
     for (let x = searchX1; x < searchX2; x++) {
-      let foundY = 0; // default: top of frame (no structure found = shoreline)
-      for (let y = height - 5; y > 5; y--) {
-        // Local vertical gradient: difference between pixels above and below
-        const above = bgGray[(y - 3) * width + x];
-        const below = bgGray[(y + 3) * width + x];
+      let foundY = 0; // default: top of frame
+      for (let y = height - 10; y > 10; y--) {
+        // Wider gradient window (±8px) to ignore water ripples
+        const above = bgGray[(y - 8) * width + x];
+        const below = bgGray[(y + 8) * width + x];
         const gradient = Math.abs(above - below);
-        if (gradient > 25) {
+        if (gradient > 60) { // High threshold: only real structures, not waves
           foundY = y;
           break;
         }
