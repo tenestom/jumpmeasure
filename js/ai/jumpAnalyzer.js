@@ -270,26 +270,26 @@ export async function analyzeJump(frames, onProgress = () => {}) {
     `f${s.frame}:x=${s.x},peak=${Math.round(s.motionPeak)},extra=${Math.round(s.totalExtra)},median=${Math.round(s.medianMotion)}`
   ).join(' | '));
   
-  // Find the landing frame: look for a consistent X position in 3+ consecutive frames
-  // The skier lands and slides → consistent X in the water zone
-  // Before landing, skier is in the air → motion might be at different X (or absent)
+  // Find the landing frame: look for consistent X in 2+ consecutive frames
+  // AFTER initialContactFrame (can't land before contact!)
   
-  // Find runs of consistent X (within ±60px)
-  for (let i = 2; i < motionTrack.length; i++) {
-    const a = motionTrack[i - 2], b = motionTrack[i - 1], c = motionTrack[i];
+  for (let i = 1; i < motionTrack.length; i++) {
+    const a = motionTrack[i - 1], b = motionTrack[i];
     
-    // All three frames have significant motion
-    if (a.motionPeak > 500 && b.motionPeak > 500 && c.motionPeak > 500) {
-      // X positions are consistent (within ±60px)
-      const xMedian = [a.x, b.x, c.x].sort((p, q) => p - q)[1];
-      const xSpread = Math.max(a.x, b.x, c.x) - Math.min(a.x, b.x, c.x);
+    // Must be AFTER contact
+    if (a.frame < safeContactFrame) continue;
+    
+    // Both frames have significant motion peak
+    if (a.motionPeak > 500 && b.motionPeak > 500) {
+      // X positions are consistent (within ±80px)
+      const xSpread = Math.abs(a.x - b.x);
       
-      if (xSpread < 120) {
-        // First consistent run = landing
+      if (xSpread < 80) {
+        const xAvg = Math.round((a.x + b.x) / 2);
         landingFrame = a.frame;
-        landingX = xMedian;
+        landingX = xAvg;
         console.log('[AI] Landing (consistent motion): frame', landingFrame, 'x:', landingX,
-          'xSpread:', xSpread, 'peaks:', a.motionPeak, b.motionPeak, c.motionPeak);
+          'xSpread:', xSpread, 'peaks:', Math.round(a.motionPeak), Math.round(b.motionPeak));
         break;
       }
     }
