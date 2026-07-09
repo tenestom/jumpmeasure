@@ -258,60 +258,34 @@ export async function analyzeJump(frames, onProgress = () => {}) {
     console.log('[AI] X: clusters:', clusters.map(c => 
       `[${c.start}-${c.end}](w=${c.width},m=${c.mass})`).join(' '));
     
-    if (clusters.length > 1) {
-      // Largest cluster = main wake
-      const mainWake = clusters.reduce((a, b) => a.mass > b.mass ? a : b);
-      
-      // Adjacent cluster on the ramp side = contains the mound
-      const adjacent = clusters.filter(c => 
-        c !== mainWake && c.mass >= 10 &&
-        (Math.abs(c.end - mainWake.start) < 20 || Math.abs(c.start - mainWake.end) < 20)
-      );
-      
-      let moundCluster = null;
-      if (adjacent.length === 1) {
-        moundCluster = adjacent[0];
-      } else if (adjacent.length > 1) {
-        const leftSpace = mainWake.start;
-        const rightSpace = width - mainWake.end;
-        const rampSide = leftSpace >= rightSpace ? 'left' : 'right';
-        moundCluster = adjacent.find(c => 
-          rampSide === 'left' ? c.end < mainWake.start : c.start > mainWake.end
-        ) || adjacent[0];
-      }
-      
-      if (moundCluster) {
-        // The mound is at the wake-facing edge of this cluster
-        // Use the 55-90% zone (skip boat at far end, skip transition at wake end)
-        const isLeftOfWake = moundCluster.end < mainWake.start;
-        let searchStart, searchEnd;
-        if (isLeftOfWake) {
-          searchStart = Math.round(moundCluster.start + moundCluster.width * 0.55);
-          searchEnd = Math.round(moundCluster.end - moundCluster.width * 0.10);
-        } else {
-          searchStart = Math.round(moundCluster.start + moundCluster.width * 0.10);
-          searchEnd = Math.round(moundCluster.start + moundCluster.width * 0.45);
-        }
-        searchStart = Math.max(searchStart, moundCluster.start);
-        searchEnd = Math.min(searchEnd, moundCluster.end);
-        
-        // Peak density in the mound zone
-        let peakCol = searchStart, peakCount = 0;
-        for (let x = searchStart; x <= searchEnd; x++) {
-          if (colProfile[x] > peakCount) { peakCount = colProfile[x]; peakCol = x; }
-        }
-        
-        landingX = peakCol;
-        console.log('[AI] X: moundCluster [', moundCluster.start, '-', moundCluster.end,
-          '] searchZone:', searchStart, '-', searchEnd, '→ landingX:', landingX);
-      } else {
-        // No adjacent cluster — use wake edge
-        landingX = mainWake.start;
-        console.log('[AI] X: no adjacent, using wake start:', landingX);
-      }
-    } else if (clusters.length === 1) {
-      landingX = clusters[0].start;
+    // The landing splash is WITHIN the largest cluster (the main wake).
+    // Find the PEAK of the colProfile within this cluster = the brightest splash
+    const mainWake = clusters.reduce((a, b) => a.mass > b.mass ? a : b);
+    
+    console.log('[AI] X: mainWake [', mainWake.start, '-', mainWake.end, 
+      '] mass:', mainWake.mass);
+    
+    // Smooth the profile within the main wake for peak detection
+    const smoothed = new Array(width).fill(0);
+    for (let x = mainWake.start + 5; x <= mainWake.end - 5; x++) {
+      let sum = 0;
+      for (let dx = -5; dx <= 5; dx++) sum += colProfile[x + dx];
+      smoothed[x] = sum;
     }
+    
+    // Find the highest peak within the main wake
+    let peakCol = mainWake.start, peakVal = 0;
+    for (let x = mainWake.start; x <= mainWake.end; x++) {
+      if (smoothed[x] > peakVal) {
+        peakVal = smoothed[x];
+        peakCol = x;
+      }
+    }
+    
+    landingX = peakCol;
+    console.log('[AI] X: peak at native', peakCol, 
+      'normalized:', (peakCol / width).toFixed(4),
+      'peakVal:', peakVal);
   }
   
   // Final fallback
