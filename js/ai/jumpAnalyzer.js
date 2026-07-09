@@ -338,16 +338,63 @@ export async function analyzeJump(frames, onProgress = () => {}) {
         clusters.map(c => `[${c.start}-${c.end}](w=${c.width},m=${c.mass})`).join(' '));
       
       if (clusters.length === 1) {
-        // Only one cluster — that's our mound
         landingX = clusters[0].centroid;
       } else if (clusters.length > 1) {
-        // Multiple clusters: the mound is the SMALLEST/most isolated one
-        // Sort by mass (smallest first) — the mound is small
-        clusters.sort((a, b) => a.mass - b.mass);
-        // Pick the smallest cluster that has at least 2 pixels
-        const mound = clusters.find(c => c.mass >= 2) || clusters[0];
-        landingX = mound.centroid;
-        console.log('[AI] X: picked smallest cluster:', mound.start, '-', mound.end, 'mass:', mound.mass);
+        // Find the LARGEST cluster = main wake trail
+        const mainWake = clusters.reduce((a, b) => a.mass > b.mass ? a : b);
+        
+        // Find clusters ADJACENT to the main wake (within 20px gap)
+        const adjacent = clusters.filter(c => 
+          c !== mainWake && 
+          c.mass >= 10 && // Significant (not edge noise)
+          (Math.abs(c.end - mainWake.start) < 20 || Math.abs(c.start - mainWake.end) < 20)
+        );
+        
+        console.log('[AI] X: mainWake:', mainWake.start, '-', mainWake.end, 
+          'adjacent:', adjacent.map(c => `[${c.start}-${c.end}]`).join(' '));
+        
+        let moundCluster = null;
+        if (adjacent.length === 1) {
+          moundCluster = adjacent[0];
+        } else if (adjacent.length > 1) {
+          // Pick the smaller adjacent cluster (mound is smaller than extended wake)
+          moundCluster = adjacent.reduce((a, b) => a.mass < b.mass ? a : b);
+        }
+        
+        if (moundCluster) {
+          // Find the PEAK DENSITY column within the mound cluster
+          // The mound is a concentrated bright spot — its center has the most pixels
+          let peakCol = moundCluster.start;
+          let peakCount = 0;
+          for (let x = moundCluster.start; x <= moundCluster.end; x++) {
+            if (colProfile[x] > peakCount) {
+              peakCount = colProfile[x];
+              peakCol = x;
+            }
+          }
+          // Use weighted centroid of columns around the peak (±20 cols)
+          let sumX = 0, sumW = 0;
+          for (let x = Math.max(moundCluster.start, peakCol - 20); x <= Math.min(moundCluster.end, peakCol + 20); x++) {
+            sumX += x * colProfile[x];
+            sumW += colProfile[x];
+          }
+          landingX = sumW > 0 ? sumX / sumW : peakCol;
+          console.log('[AI] X: mound cluster [', moundCluster.start, '-', moundCluster.end, 
+            '] peakCol:', peakCol, '→ landingX:', Math.round(landingX));
+        } else {
+          // No adjacent cluster found — use edge of main wake closest to frame edge
+          // (The mound is at the beginning of the trail)
+          const distToLeft = mainWake.start;
+          const distToRight = width - mainWake.end;
+          if (distToLeft < distToRight) {
+            // Wake starts from left — mound at left edge
+            landingX = mainWake.start;
+          } else {
+            // Wake starts from right — mound at right edge
+            landingX = mainWake.end;
+          }
+          console.log('[AI] X: no adjacent cluster, using wake edge:', Math.round(landingX));
+        }
       }
     }
     
