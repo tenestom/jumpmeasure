@@ -747,31 +747,42 @@ function floodFill(diff, visited, width, height, startX, startY, threshold, roiT
  */
 function findWaterline(bgGray, width, height) {
   const scanTop    = Math.floor(height * 0.05);
-  const scanBottom = Math.floor(height * 0.60); // scan wider range again
-  
-  // Edge threshold: pixel difference that counts as a real edge
+  const scanBottom = Math.floor(height * 0.60);
   const edgeThreshold = 8;
   
-  let maxCoverage = -1;
-  let waterlineY = Math.floor(height * 0.22); // default fallback
-  
-  // For each row: COUNT how many columns have a significant edge.
-  // Shoreline spans full width → high count.
-  // Boat wake is narrow → low count.
+  // Step 1: per-row edge score (how many columns have a significant edge)
+  const rowScore = new Float32Array(height).fill(0);
   for (let y = scanTop; y < scanBottom; y++) {
-    let coverage = 0;
+    let count = 0;
     for (let x = 0; x < width; x++) {
       if (Math.abs(bgGray[y * width + x] - bgGray[(y + 1) * width + x]) > edgeThreshold) {
-        coverage++;
+        count++;
       }
     }
-    if (coverage > maxCoverage) {
-      maxCoverage = coverage;
-      waterlineY = y;
-    }
+    rowScore[y] = count;
   }
   
-  console.log('[AI] Waterline scan: best row Y=', waterlineY, 'coverage=', maxCoverage, '/', width, '(', Math.round(maxCoverage/width*100), '%)');
+  // Step 2: smooth over ±6 rows — thick edge zones (shoreline/trees) get high score,
+  // thin streaks (wake = 1-2 rows) get diluted.
+  const smoothed = new Float32Array(height).fill(0);
+  const radius = 6;
+  for (let y = scanTop; y < scanBottom; y++) {
+    let sum = 0, cnt = 0;
+    for (let dy = -radius; dy <= radius; dy++) {
+      const yy = y + dy;
+      if (yy >= scanTop && yy < scanBottom) { sum += rowScore[yy]; cnt++; }
+    }
+    smoothed[y] = sum / cnt;
+  }
+  
+  // Step 3: find row with highest smoothed score = thickest edge zone = shoreline
+  let maxVal = -1;
+  let waterlineY = Math.floor(height * 0.22);
+  for (let y = scanTop; y < scanBottom; y++) {
+    if (smoothed[y] > maxVal) { maxVal = smoothed[y]; waterlineY = y; }
+  }
+  
+  console.log('[AI] Waterline (thick edge): Y=', waterlineY, 'smoothed score=', maxVal.toFixed(0));
   return waterlineY;
 }
 
