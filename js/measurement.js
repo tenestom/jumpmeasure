@@ -74,7 +74,22 @@ export function drawLine(ox, oy, vw, vh) {
     measurementValue.textContent = '--.-- m';
   }
   
-  // Debug: draw ramp marker as red dot
+  // Debug: draw detected waterline as cyan horizontal line
+  if (state.aiWaterlineY !== null) {
+    const wy = oy + state.aiWaterlineY * vh;
+    ctx.beginPath();
+    ctx.moveTo(ox, wy);
+    ctx.lineTo(ox + vw, wy);
+    ctx.strokeStyle = 'rgba(0, 255, 255, 0.8)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([8, 4]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = 'rgba(0, 255, 255, 0.9)';
+    ctx.font = '11px monospace';
+    ctx.fillText('WATERLINE', ox + 4, wy - 4);
+  }
+
   if (state.rampMarker) {
     const rpx = ox + state.rampMarker.x * vw;
     const rpy = oy + state.rampMarker.y * vh;
