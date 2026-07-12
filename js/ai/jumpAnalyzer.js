@@ -746,24 +746,32 @@ function floodFill(diff, visited, width, height, startX, startY, threshold, roiT
  * Robust to both dark-shore/light-water and light-shore/dark-water.
  */
 function findWaterline(bgGray, width, height) {
-  const scanTop    = Math.floor(height * 0.05);  // skip very top (sky)
-  const scanBottom = Math.floor(height * 0.38);  // stop at 38% — below that is open water/wake
+  const scanTop    = Math.floor(height * 0.05);
+  const scanBottom = Math.floor(height * 0.60); // scan wider range again
   
-  let maxScore = -1;
+  // Edge threshold: pixel difference that counts as a real edge
+  const edgeThreshold = 8;
+  
+  let maxCoverage = -1;
   let waterlineY = Math.floor(height * 0.22); // default fallback
   
-  // For each row: sum absolute difference with row below
+  // For each row: COUNT how many columns have a significant edge.
+  // Shoreline spans full width → high count.
+  // Boat wake is narrow → low count.
   for (let y = scanTop; y < scanBottom; y++) {
-    let rowScore = 0;
+    let coverage = 0;
     for (let x = 0; x < width; x++) {
-      rowScore += Math.abs(bgGray[y * width + x] - bgGray[(y + 1) * width + x]);
+      if (Math.abs(bgGray[y * width + x] - bgGray[(y + 1) * width + x]) > edgeThreshold) {
+        coverage++;
+      }
     }
-    if (rowScore > maxScore) {
-      maxScore = rowScore;
+    if (coverage > maxCoverage) {
+      maxCoverage = coverage;
       waterlineY = y;
     }
   }
   
+  console.log('[AI] Waterline scan: best row Y=', waterlineY, 'coverage=', maxCoverage, '/', width, '(', Math.round(maxCoverage/width*100), '%)');
   return waterlineY;
 }
 
