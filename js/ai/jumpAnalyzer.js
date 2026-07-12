@@ -436,12 +436,12 @@ export async function analyzeJump(frames, onProgress = () => {}) {
   // Search zone Y: detect waterline from background frame
   // The waterline = strongest horizontal edge across full width (shoreline vs water).
   // Skier is always BELOW this line.
-  const waterlineY = findWaterline(bgGray, width, height);
+  const detectedWaterlineY = findWaterline(bgGray, width, height);
   const skierHeight = Math.floor(height * 0.18); // approx max skier height in frame
-  const searchYTop = waterlineY;                  // start right at waterline
-  const searchYBot = Math.min(height - 1, waterlineY + skierHeight);
+  const searchYTop = detectedWaterlineY;          // start right at waterline
+  const searchYBot = Math.min(height - 1, detectedWaterlineY + skierHeight);
   
-  console.log('[AI] Waterline detected at Y:', waterlineY, '→ search Y:', searchYTop, '-', searchYBot);
+  console.log('[AI] Waterline detected at Y:', detectedWaterlineY, '→ search Y:', searchYTop, '-', searchYBot);
   
   // Skier size constraints (native pixels)
   const MIN_W = 15, MAX_W = 120;
