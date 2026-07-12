@@ -399,25 +399,24 @@ export async function analyzeJump(frames, onProgress = () => {}) {
     }
   }
   
-  console.log('[AI] frameWidth:', width, 'frameHeight:', height);
+  // STEP 2: FIND SKIER USING SHAPE-SCORED MULTI-FRAME SCAN
+  // Scan frames in a window around the estimated landing.
+  // For each frame: background-subtract → find blobs → score by silhouette shape.
+  // The skier has: correct size, tall aspect ratio, ski-signature (wider at bottom).
+  // Store all detections; measurement frame = frame with highest score.
   
-  // STEP 2: FIND SKIER USING COLUMN-TO-NEIGHBOR COMPARISON
-  // The skier blocks the background — their columns look different from neighboring columns.
-  // No background model needed. Compare each column to its local neighbors in the SAME frame.
-  // Scan from the ramp edge outward — FIRST WIDE cluster = the skier.
   let blobBox = null;
+  const allDetections = new Array(totalFrames).fill(null);
   
-  // Get last known flight blob position (for visualization and fallback)
+  // Get last known flight blob for visualization
   let predX = lastKnownX || (peakFrame ? peakFrame.cx : width / 2);
   let predBlobFrame = -1;
-  for (let f = Math.max(0, safeContactFrame - 5); f <= safeContactFrame; f++) {
-    if (f < trackingData.length && trackingData[f].detected && trackingData[f].area < 5000) {
+  for (let f = Math.max(0, safeContactFrame - 15); f <= safeContactFrame; f++) {
+    if (f < trackingData.length && trackingData[f].detected && trackingData[f].area < 8000) {
       predX = trackingData[f].cx;
       predBlobFrame = f;
     }
   }
-  
-  // Save last flight blob for visualization
   const lastFlightBlob = predBlobFrame >= 0 ? trackingData[predBlobFrame] : null;
   const predBlobBox = lastFlightBlob ? {
     x: lastFlightBlob.bbox.x / width,
@@ -425,146 +424,133 @@ export async function analyzeJump(frames, onProgress = () => {}) {
     w: lastFlightBlob.bbox.w / width,
     h: lastFlightBlob.bbox.h / height,
   } : null;
-  console.log('[AI] Last flight blob: frame', predBlobFrame, 'cx=', predX, 'bbox=', lastFlightBlob ? JSON.stringify(lastFlightBlob.bbox) : 'none');
+  console.log('[AI] Last flight blob: frame', predBlobFrame, 'cx=', predX);
   
-  const landGray = toGrayscale(frames[landingFrame]);
-  
-  // Use ramp dimensions — fallback if height detection failed (< 10px)
-  const rampWaterY = rampNativeY || Math.floor(height * 0.30);
-  const detectedRampH = (rampNativeTopY && rampNativeY) ? (rampNativeY - rampNativeTopY) : 0;
-  const rampHeight = detectedRampH >= 10 ? detectedRampH : Math.floor(height * 0.10);
-  
-  // Vertical strip: from rampTopY to rampBaseY (same height as ramp = approx skier height)
-  const stripTop = Math.max(0, rampWaterY - rampHeight);
-  const stripBot = Math.min(height - 1, rampWaterY + Math.floor(rampHeight * 0.3));
-  const stripH = Math.max(1, stripBot - stripTop);
-  
-  console.log('[AI] Strip: rampHeight=', rampHeight, 'stripTop=', stripTop, 'stripBot=', stripBot, 'stripH=', stripH);
-  
-  // Determine scan direction: from ramp edge outward
-  // If ramp is right, scan LEFT from ramp. If ramp is left, scan RIGHT.
-  const rampEdge = rampIsRight 
+  // Search zone X: from ramp exclusion to opposite side
+  const rampEdge = rampIsRight
     ? (rampNativeStartX || Math.floor(width * 0.7))
     : (rampNativeEndX || Math.floor(width * 0.3));
+  const searchXStart = rampIsRight ? 0 : rampEdge + rampFullWidth;
+  const searchXEnd   = rampIsRight ? rampEdge - rampFullWidth : width;
   
-  // For each column: compute average brightness in the strip above waterline
-  const colAvg = new Array(width).fill(0);
-  for (let x = 0; x < width; x++) {
-    let sum = 0;
-    for (let y = stripTop; y < stripBot; y++) {
-      sum += landGray[y * width + x];
+  // Search zone Y: ~30% of frame height above waterline to slightly below
+  const rampWaterY = rampNativeY || Math.floor(height * 0.30);
+  const searchYTop = Math.max(0, rampWaterY - Math.floor(height * 0.25));
+  const searchYBot = Math.min(height - 1, rampWaterY + Math.floor(height * 0.05));
+  
+  console.log('[AI] Search zone X:', searchXStart, '-', searchXEnd, 'Y:', searchYTop, '-', searchYBot);
+  
+  // Skier size constraints (native pixels)
+  const MIN_W = 15, MAX_W = 120;
+  const MIN_H = 50, MAX_H = 250;
+  const DIFF_THRESHOLD = 20;
+  
+  // Scan window: fullLandingFrame - 20 to fullLandingFrame + 5
+  const scanFrom = Math.max(0, (fullLandingFrame || safeContactFrame) - 20);
+  const scanTo   = Math.min(totalFrames - 1, (fullLandingFrame || safeContactFrame) + 5);
+  
+  let bestScore = -1;
+  let bestFrame = landingFrame;
+  let bestLandingX = null;
+  
+  for (let f = scanFrom; f <= scanTo; f++) {
+    const fGray = toGrayscale(frames[f]);
+    const fDiff = new Uint8Array(width * height);
+    for (let i = 0; i < fGray.length; i++) {
+      fDiff[i] = Math.min(255, Math.abs(fGray[i] - bgGray[i]));
     }
-    colAvg[x] = sum / stripH;
-  }
-  
-  // For each column: compute deviation from LOCAL neighbors (±20 columns)
-  const neighborRadius = 20;
-  const deviation = new Array(width).fill(0);
-  for (let x = neighborRadius; x < width - neighborRadius; x++) {
-    // Local average (excluding the column itself and close neighbors)
-    let localSum = 0, localCount = 0;
-    for (let dx = -neighborRadius; dx <= neighborRadius; dx++) {
-      if (Math.abs(dx) < 5) continue; // skip close neighbors
-      localSum += colAvg[x + dx];
-      localCount++;
+    
+    // Find all blobs in search zone
+    const visited = new Uint8Array(width * height);
+    const frameCandidates = [];
+    
+    for (let y = searchYTop; y < searchYBot; y++) {
+      for (let x = searchXStart; x < searchXEnd; x++) {
+        const idx = y * width + x;
+        if (visited[idx] || fDiff[idx] < DIFF_THRESHOLD) continue;
+        const comp = floodFill(fDiff, visited, width, height, x, y, DIFF_THRESHOLD,
+          searchYTop, searchYBot, searchXStart, searchXEnd);
+        if (comp.area < 50) continue; // skip tiny noise
+        frameCandidates.push(comp);
+      }
     }
-    const localAvg = localSum / localCount;
-    deviation[x] = Math.abs(colAvg[x] - localAvg);
-  }
-  
-  // Smooth deviation
-  const smoothDev = new Array(width).fill(0);
-  for (let x = 3; x < width - 3; x++) {
-    let sum = 0;
-    for (let dx = -3; dx <= 3; dx++) sum += deviation[x + dx];
-    smoothDev[x] = sum / 7;
-  }
-  
-  // Scan from ramp edge outward, find clusters of deviating columns
-  const scanStart = rampIsRight ? rampEdge - 10 : rampEdge + 10;
-  const scanEnd = rampIsRight ? 0 : width;
-  const scanDir = rampIsRight ? -1 : 1;
-  
-  // Find threshold: median deviation in the scan zone (= water baseline)
-  const waterDevs = [];
-  for (let x = scanStart; x !== scanEnd; x += scanDir) {
-    if (x < neighborRadius || x >= width - neighborRadius) continue;
-    waterDevs.push(smoothDev[x]);
-  }
-  waterDevs.sort((a, b) => a - b);
-  const medianDev = waterDevs[Math.floor(waterDevs.length * 0.5)] || 1;
-  const devThreshold = Math.max(medianDev * 3, 2); // 3x median or minimum 2
-  
-  // Find clusters of deviating columns
-  const skierClusters = [];
-  cStart = -1;
-  for (let x = scanStart; x !== scanEnd; x += scanDir) {
-    if (x < neighborRadius || x >= width - neighborRadius) continue;
-    const xIdx = rampIsRight ? x : x; // actual x position
-    if (smoothDev[xIdx] > devThreshold) {
-      if (cStart === -1) cStart = xIdx;
-    } else {
-      if (cStart !== -1) {
-        const s = Math.min(cStart, xIdx);
-        const e = Math.max(cStart, xIdx) - 1;
-        const w = e - s + 1;
-        if (w >= 3 && w <= 150) {
-          const cx = Math.round((s + e) / 2);
-          const distToPred = Math.abs(cx - predX);
-          skierClusters.push({ start: s, end: e, width: w, cx, distToPred });
-        }
-        cStart = -1;
+    
+    // Score each blob by silhouette criteria
+    let frameScore = -1;
+    let frameBlob = null;
+    
+    for (const c of frameCandidates) {
+      const bw = c.w, bh = c.h;
+      if (bw < MIN_W || bw > MAX_W || bh < MIN_H || bh > MAX_H) continue;
+      
+      const aspectRatio = bh / bw; // should be ~1.5-5 for a standing person
+      if (aspectRatio < 1.0 || aspectRatio > 6.0) continue;
+      
+      // Ski signature: measure diff-pixel width at bottom 25% vs middle 40-60%
+      const midY    = Math.round(c.minY + bh * 0.5);
+      const bottomY = Math.round(c.minY + bh * 0.85);
+      let midW = 0, botW = 0;
+      for (let x = c.minX; x <= c.maxX; x++) {
+        if (fDiff[midY    * width + x] >= DIFF_THRESHOLD) midW++;
+        if (fDiff[bottomY * width + x] >= DIFF_THRESHOLD) botW++;
+      }
+      const skiRatio = midW > 0 ? botW / midW : 0;
+      // skiRatio > 1 means bottom wider than middle = ski signature
+      
+      // Roundedness at top: top 10% width should be < body width
+      const topY = Math.round(c.minY + bh * 0.1);
+      let topW = 0;
+      for (let x = c.minX; x <= c.maxX; x++) {
+        if (fDiff[topY * width + x] >= DIFF_THRESHOLD) topW++;
+      }
+      const topRatio = bw > 0 ? topW / bw : 1; // <1 means tapered top = helmet
+      
+      // Composite score (higher = more skier-like)
+      let score = 0;
+      score += Math.min(aspectRatio / 2.5, 1.0) * 30;       // aspect ratio (tall)
+      score += Math.min(skiRatio, 2.0) / 2.0 * 25;          // ski signature
+      score += (1 - Math.min(topRatio, 1)) * 20;            // rounded top
+      score += Math.min(c.area / 500, 1.0) * 15;            // sufficient size
+      score += (bw >= 25 && bw <= 80) ? 10 : 0;             // right width range
+      
+      if (score > frameScore) {
+        frameScore = score;
+        frameBlob = c;
+      }
+    }
+    
+    if (frameBlob && frameScore > 30) {
+      const detection = {
+        score: frameScore,
+        box: {
+          x: frameBlob.minX / width,
+          y: frameBlob.minY / height,
+          w: frameBlob.w / width,
+          h: frameBlob.h / height,
+        },
+        nativeX: rampIsRight ? frameBlob.maxX : frameBlob.minX, // ramp-side edge
+        nativeBox: frameBlob,
+      };
+      allDetections[f] = detection;
+      
+      if (frameScore > bestScore) {
+        bestScore = frameScore;
+        bestFrame = f;
+        bestLandingX = detection.nativeX;
+        blobBox = detection.box;
       }
     }
   }
   
-  console.log('[AI] Column deviation: rampEdge:', rampEdge, 'stripTop:', stripTop, 
-    'stripBot:', stripBot, 'medianDev:', medianDev.toFixed(1), 'threshold:', devThreshold.toFixed(1),
-    'predX:', predX, 'clusters:', skierClusters.map(c => 
-      `[${c.start}-${c.end}](w=${c.width},cx=${c.cx},dist=${c.distToPred})`).join(' '));
-  
-  if (skierClusters.length > 0) {
-    // Exclude everything within one full ramp-width from the ramp edge
-    const rampExcludeX = rampIsRight ? rampEdge : (rampNativeEndX || Math.floor(width * 0.3));
-    const rampExcludeMargin = rampFullWidth; // at least one ramp-width away
-    const validClusters = skierClusters.filter(c => 
-      rampIsRight ? c.cx < rampExcludeX - rampExcludeMargin
-                  : c.cx > rampExcludeX + rampExcludeMargin
-    );
-    
-    // FIRST: try to find the first WIDE cluster scanning from ramp outward
-    // Wide = likely a real object (skier), narrow = noise/trees
-    // Scan order: clusters are ordered by scan direction (ramp outward)
-    // We need to sort by proximity to ramp
-    const sortedByRamp = [...validClusters].sort((a, b) =>
-      rampIsRight ? b.cx - a.cx : a.cx - b.cx // closest to ramp first
-    );
-    
-    // Take first cluster with width >= 15px (skier-sized), skip narrow noise
-    const wideCluster = sortedByRamp.find(c => c.width >= 15);
-    // Fallback: first cluster of any width
-    const skierCluster = wideCluster || sortedByRamp[0] || candidates.reduce((a, b) =>
-      a.distToPred < b.distToPred ? a : b);
-    
-    // Use the edge of the cluster CLOSEST to the ramp = rear ski tip
-    landingX = rampIsRight ? skierCluster.end : skierCluster.start;
-    
-    blobBox = {
-      x: skierCluster.start / width,
-      y: stripTop / height,
-      w: skierCluster.width / width,
-      h: (stripBot - stripTop + 20) / height
-    };
-    
-    console.log('[AI] Skier found: x=', landingX, 
-      'cluster:', skierCluster.start, '-', skierCluster.end,
-      'width:', skierCluster.width);
-  }
-  
-  // Fallback
-  if (landingX === null) {
+  // Update landing frame and X from best detection
+  if (bestLandingX !== null) {
+    landingFrame = bestFrame;
+    landingX = bestLandingX;
+    console.log('[AI] Best skier frame:', bestFrame, 'score:', bestScore.toFixed(1), 'x:', bestLandingX);
+  } else {
+    // Fallback
     landingX = lastKnownX || width / 2;
-    console.log('[AI] X: fallback lastKnownX:', Math.round(landingX));
+    console.log('[AI] No skier found by shape — fallback x:', Math.round(landingX));
   }
   
   console.log('[AI] Final: frame', landingFrame, 'x:', Math.round(landingX));
@@ -574,10 +560,11 @@ export async function analyzeJump(frames, onProgress = () => {}) {
 
   // Calculate confidence based on multiple signals
   let confidence = 0;
-  if (yRange > 20) confidence += 0.3;  // Clear vertical motion
-  if (detectedFrames.length > 10) confidence += 0.2;  // Enough tracking data
-  if (initialContactFrame !== null) confidence += 0.2;  // Contact detected
-  if (landingFrame !== null) confidence += 0.3;  // Landing detected
+  if (yRange > 20) confidence += 0.3;
+  if (detectedFrames.length > 10) confidence += 0.2;
+  if (initialContactFrame !== null) confidence += 0.2;
+  if (bestScore > 50) confidence += 0.3;
+  else if (landingFrame !== null) confidence += 0.1;
 
   confidence = Math.min(1, confidence);
 
@@ -602,6 +589,7 @@ export async function analyzeJump(frames, onProgress = () => {}) {
 
   onProgress(1, 'Analysis complete!');
 
+
   return {
     landingFrameIndex: landingFrame,
     landingX: landingXNorm,
@@ -614,6 +602,7 @@ export async function analyzeJump(frames, onProgress = () => {}) {
     blobBox,
     predBlobBox,
     frameWidth: width,
+    allDetections,
   };
 }
 

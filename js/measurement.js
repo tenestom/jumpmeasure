@@ -90,7 +90,11 @@ export function drawLine(ox, oy, vw, vh) {
     ctx.fillText('RAMP', rpx + 14, rpy + 4);
   }
   
-  // Debug: draw blob bounding box as red rectangle
+  // Draw per-frame skier detection from allDetections[]
+  const frameDetection = state.allDetections && state.allDetections[state.replayIndex];
+  const isMeasurementFrame = state.replayIndex === Math.round((state.lineX || 0) * (state.aiFrameWidth || vw) / (state.aiFrameWidth || vw) * (state.frames ? state.frames.length - 1 : 0));
+  
+  // Also draw the stored blobBox (measurement frame) in solid red
   if (state.blobBox) {
     const bx = ox + state.blobBox.x * vw;
     const by = oy + state.blobBox.y * vh;
@@ -104,6 +108,22 @@ export function drawLine(ox, oy, vw, vh) {
     ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
     ctx.font = '11px sans-serif';
     ctx.fillText('BLOB', bx, by - 4);
+  }
+  
+  // Draw current frame detection in orange (if different from measurement frame)
+  if (frameDetection) {
+    const dbx = ox + frameDetection.box.x * vw;
+    const dby = oy + frameDetection.box.y * vh;
+    const dbw = frameDetection.box.w * vw;
+    const dbh = frameDetection.box.h * vh;
+    ctx.beginPath();
+    ctx.rect(dbx, dby, dbw, dbh);
+    ctx.strokeStyle = 'rgba(255, 140, 0, 0.9)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.fillStyle = 'rgba(255, 140, 0, 0.9)';
+    ctx.font = '11px sans-serif';
+    ctx.fillText(`score:${frameDetection.score.toFixed(0)}`, dbx, dby - 4);
   }
   
   // Draw last flight blob (yellow) - where skier was just before landing

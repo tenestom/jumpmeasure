@@ -18,7 +18,11 @@ export const state = {
   lastPinchMidX: 0,
   lastPinchMidY: 0,
   rafId: null,
-  rampMarker: null,  // {x, y} normalized 0..1 — debug: ramp position
+  rampMarker: null,
+  blobBox: null,
+  predBlobBox: null,
+  aiFrameWidth: null,
+  allDetections: [],  // array indexed by frame, each {box, score} or null
 };
 
 export const ZOOM_MIN = 1;

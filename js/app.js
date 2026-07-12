@@ -301,6 +301,7 @@ if (aiDetectBtn) {
         state.blobBox = result.blobBox || null;
         state.predBlobBox = result.predBlobBox || null;
         state.aiFrameWidth = result.frameWidth || null;
+        state.allDetections = result.allDetections || [];
         
         // Navigate to the landing frame
         if (result.landingFrameIndex !== null) {
