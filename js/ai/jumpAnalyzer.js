@@ -201,10 +201,50 @@ export async function analyzeJump(frames, onProgress = () => {}) {
   let rampIsRight = null;
   
   const safeContactFrame = initialContactFrame || Math.floor(totalFrames * 0.4);
-  landingFrame = Math.min(safeContactFrame + 7, totalFrames - 1);
+  
+  // Find landing frame by detecting when blob's vertical descent stops (vy → 0)
+  // After the peak, the blob descends. When cy stops increasing = blob hit water.
+  // We want 10 frames BEFORE that (rear ski tip first touching water).
+  const LANDING_OFFSET = -10;
+  let fullLandingFrame = null;
+  
+  // Collect detected frames after peak with smoothed cy
+  const postPeakDetected = trackingData.filter(t => 
+    t.detected && t.frame > peakFrame.frame && t.frame <= safeContactFrame + 30
+  );
+  
+  // Smooth cy over 3-frame window to reduce noise
+  for (let i = 1; i < postPeakDetected.length - 1; i++) {
+    const prev = postPeakDetected[i - 1].cy;
+    const curr = postPeakDetected[i].cy;
+    const next = postPeakDetected[i + 1].cy;
+    postPeakDetected[i]._smoothCy = (prev + curr + next) / 3;
+  }
+  if (postPeakDetected.length > 0) {
+    postPeakDetected[0]._smoothCy = postPeakDetected[0].cy;
+    postPeakDetected[postPeakDetected.length - 1]._smoothCy = postPeakDetected[postPeakDetected.length - 1].cy;
+  }
+  
+  // Find where vertical velocity (delta cy) drops to near zero or reverses
+  // = blob stops descending = full water contact
+  for (let i = 1; i < postPeakDetected.length; i++) {
+    const dcy = postPeakDetected[i]._smoothCy - postPeakDetected[i - 1]._smoothCy;
+    if (dcy <= 1) { // stopped descending (cy no longer increasing)
+      fullLandingFrame = postPeakDetected[i].frame;
+      break;
+    }
+  }
+  
+  // Apply offset: go back 10 frames from full landing = rear ski tip contact
+  if (fullLandingFrame !== null) {
+    landingFrame = Math.max(0, fullLandingFrame + LANDING_OFFSET);
+  } else {
+    // Fallback: use contact + 7
+    landingFrame = Math.min(safeContactFrame + 7, totalFrames - 1);
+  }
   
   console.log('[AI] initialContactFrame:', initialContactFrame, 'peakFrame:', peakFrame.frame);
-  console.log('[AI] Landing frame (contact+7):', landingFrame);
+  console.log('[AI] Full landing (vy=0):', fullLandingFrame, '→ measurement frame (offset', LANDING_OFFSET, '):', landingFrame);
   
   // STEP 1: LOCATE RAMP using vertical edge detection at horizon zone
   // The ramp has STRAIGHT EDGES (triangle sides) that create strong vertical edges.
