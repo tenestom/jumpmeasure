@@ -433,12 +433,15 @@ export async function analyzeJump(frames, onProgress = () => {}) {
   const searchXStart = rampIsRight ? 0 : rampEdge + rampFullWidth;
   const searchXEnd   = rampIsRight ? rampEdge - rampFullWidth : width;
   
-  // Search zone Y: ~30% of frame height above waterline to slightly below
-  const rampWaterY = rampNativeY || Math.floor(height * 0.30);
-  const searchYTop = Math.max(0, rampWaterY - Math.floor(height * 0.25));
-  const searchYBot = Math.min(height - 1, rampWaterY + Math.floor(height * 0.05));
+  // Search zone Y: detect waterline from background frame
+  // The waterline = strongest horizontal edge across full width (shoreline vs water).
+  // Skier is always BELOW this line.
+  const waterlineY = findWaterline(bgGray, width, height);
+  const skierHeight = Math.floor(height * 0.18); // approx max skier height in frame
+  const searchYTop = waterlineY;                  // start right at waterline
+  const searchYBot = Math.min(height - 1, waterlineY + skierHeight);
   
-  console.log('[AI] Search zone X:', searchXStart, '-', searchXEnd, 'Y:', searchYTop, '-', searchYBot);
+  console.log('[AI] Waterline detected at Y:', waterlineY, '→ search Y:', searchYTop, '-', searchYBot);
   
   // Skier size constraints (native pixels)
   const MIN_W = 15, MAX_W = 120;
@@ -724,6 +727,36 @@ function floodFill(diff, visited, width, height, startX, startY, threshold, roiT
     h: maxY - minY + 1,
     minX, maxX, minY, maxY
   };
+}
+
+/**
+ * Find the waterline Y coordinate — the horizontal boundary between
+ * the shoreline/trees (background) and open water.
+ * Works by finding the row with the strongest horizontal edge across
+ * the full image width. Scans the middle 60% of the frame vertically
+ * to avoid sky at the top and foreground water at the bottom.
+ * Robust to both dark-shore/light-water and light-shore/dark-water.
+ */
+function findWaterline(bgGray, width, height) {
+  const scanTop    = Math.floor(height * 0.05);  // skip very top (sky)
+  const scanBottom = Math.floor(height * 0.60);  // stop before lower water
+  
+  let maxScore = -1;
+  let waterlineY = Math.floor(height * 0.25); // default fallback
+  
+  // For each row: sum absolute difference with row below
+  for (let y = scanTop; y < scanBottom; y++) {
+    let rowScore = 0;
+    for (let x = 0; x < width; x++) {
+      rowScore += Math.abs(bgGray[y * width + x] - bgGray[(y + 1) * width + x]);
+    }
+    if (rowScore > maxScore) {
+      maxScore = rowScore;
+      waterlineY = y;
+    }
+  }
+  
+  return waterlineY;
 }
 
 /**
