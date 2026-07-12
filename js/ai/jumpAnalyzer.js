@@ -436,10 +436,18 @@ export async function analyzeJump(frames, onProgress = () => {}) {
   // Search zone Y: detect waterline from background frame
   // The waterline = strongest horizontal edge across full width (shoreline vs water).
   // Skier body is ABOVE the waterline (head at top, skis touch water at bottom).
-  const detectedWaterlineY = findWaterline(bgGray, width, height);
-  const skierHeight = Math.floor(height * 0.20); // approx max skier height in frame
+  let detectedWaterlineY = findWaterline(bgGray, width, height);
+  
+  // Sanity check: if ramp was detected its base is AT the waterline.
+  // If our detected waterline is far below rampNativeY, prefer rampNativeY.
+  if (rampNativeY && Math.abs(detectedWaterlineY - rampNativeY) > height * 0.10) {
+    console.log('[AI] Waterline sanity: detected', detectedWaterlineY, 'vs ramp', rampNativeY, '→ using ramp');
+    detectedWaterlineY = rampNativeY;
+  }
+  
+  const skierHeight = Math.floor(height * 0.22); // approx max skier height in frame
   const searchYTop = Math.max(0, detectedWaterlineY - skierHeight); // above waterline
-  const searchYBot = Math.min(height - 1, detectedWaterlineY + Math.floor(height * 0.03)); // just below
+  const searchYBot = Math.min(height - 1, detectedWaterlineY + Math.floor(height * 0.04)); // just below
   
   console.log('[AI] Waterline Y:', detectedWaterlineY, '→ search Y:', searchYTop, '-', searchYBot);
   
@@ -739,10 +747,10 @@ function floodFill(diff, visited, width, height, startX, startY, threshold, roiT
  */
 function findWaterline(bgGray, width, height) {
   const scanTop    = Math.floor(height * 0.05);  // skip very top (sky)
-  const scanBottom = Math.floor(height * 0.60);  // stop before lower water
+  const scanBottom = Math.floor(height * 0.38);  // stop at 38% — below that is open water/wake
   
   let maxScore = -1;
-  let waterlineY = Math.floor(height * 0.25); // default fallback
+  let waterlineY = Math.floor(height * 0.22); // default fallback
   
   // For each row: sum absolute difference with row below
   for (let y = scanTop; y < scanBottom; y++) {
