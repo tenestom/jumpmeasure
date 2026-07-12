@@ -748,10 +748,11 @@ function floodFill(diff, visited, width, height, startX, startY, threshold, roiT
  */
 function findWaterline(bgGray, width, height) {
   const scanTop    = Math.floor(height * 0.05);
-  const scanBottom = Math.floor(height * 0.60);
+  const scanBottom = Math.floor(height * 0.65);
   const edgeThreshold = 8;
+  const checkRows = 30; // rows below candidate to measure uniformity
   
-  // Step 1: per-row edge score (how many columns have a significant edge)
+  // Step 1: per-row edge coverage (how many columns have a significant edge)
   const rowScore = new Float32Array(height).fill(0);
   for (let y = scanTop; y < scanBottom; y++) {
     let count = 0;
@@ -763,8 +764,7 @@ function findWaterline(bgGray, width, height) {
     rowScore[y] = count;
   }
   
-  // Step 2: smooth over ±6 rows — thick edge zones (shoreline/trees) get high score,
-  // thin streaks (wake = 1-2 rows) get diluted.
+  // Step 2: smooth ±6 rows to measure vertical thickness
   const smoothed = new Float32Array(height).fill(0);
   const radius = 6;
   for (let y = scanTop; y < scanBottom; y++) {
@@ -776,15 +776,45 @@ function findWaterline(bgGray, width, height) {
     smoothed[y] = sum / cnt;
   }
   
-  // Step 3: find row with highest smoothed score = thickest edge zone = shoreline
-  let maxVal = -1;
-  let waterlineY = Math.floor(height * 0.22);
+  // Step 3: global max → threshold for "real" edge zones
+  let globalMax = 0;
   for (let y = scanTop; y < scanBottom; y++) {
-    if (smoothed[y] > maxVal) { maxVal = smoothed[y]; waterlineY = y; }
+    if (smoothed[y] > globalMax) globalMax = smoothed[y];
+  }
+  const minEdgeThreshold = globalMax * 0.35;
+  
+  // Step 4: among all thick edge zones, pick the one with MOST UNIFORM region below.
+  // Below sky/tree boundary → trees (high variance).
+  // Below tree/water boundary → water (low variance) ← this is what we want.
+  let bestY = Math.floor(height * 0.22);
+  let lowestVariance = Infinity;
+  
+  for (let y = scanTop; y < scanBottom - checkRows; y++) {
+    if (smoothed[y] < minEdgeThreshold) continue; // not a thick edge, skip
+    
+    // Measure variance of rows below this candidate
+    let sum = 0, sumSq = 0, cnt = 0;
+    const sampleStep = 4; // sample every 4th pixel for speed
+    for (let dy = 5; dy < checkRows; dy++) {
+      const yy = y + dy;
+      if (yy >= height) break;
+      for (let x = 0; x < width; x += sampleStep) {
+        const v = bgGray[yy * width + x];
+        sum += v; sumSq += v * v; cnt++;
+      }
+    }
+    if (cnt === 0) continue;
+    const mean = sum / cnt;
+    const variance = (sumSq / cnt) - (mean * mean);
+    
+    if (variance < lowestVariance) {
+      lowestVariance = variance;
+      bestY = y;
+    }
   }
   
-  console.log('[AI] Waterline (thick edge): Y=', waterlineY, 'smoothed score=', maxVal.toFixed(0));
-  return waterlineY;
+  console.log('[AI] Waterline (uniform below): Y=', bestY, 'variance below=', lowestVariance.toFixed(1));
+  return bestY;
 }
 
 /**
