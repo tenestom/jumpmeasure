@@ -557,7 +557,7 @@ export async function analyzeJump(frames, calibPoints = [], onProgress = () => {
   if (yRange > 20) confidence += 0.3;
   if (detectedFrames.length > 10) confidence += 0.2;
   if (initialContactFrame !== null) confidence += 0.2;
-  if (bestGlobalScore > 0) confidence += 0.3;
+  if (bestLandingFrame !== null) confidence += 0.3;
   else if (landingFrame !== null) confidence += 0.1;
 
   confidence = Math.min(1, confidence);
