@@ -474,8 +474,11 @@ export async function analyzeJump(frames, calibPoints = [], onProgress = () => {
   const scanStartFrame = fullLandingFrame !== null ? fullLandingFrame : Math.min(safeContactFrame + 15, totalFrames - 1);
   const scanEndFrame = Math.max(0, scanStartFrame - 80);
   
-  const splashYTop = Math.max(0, estimatedWaterlineY - 10);
-  const splashYBot = Math.min(height - 1, estimatedWaterlineY + 10);
+  // The boat drives perfectly on the waterline (Y=0).
+  // The skier swings out and lands slightly BELOW the waterline (closer to camera, Y>0).
+  // By shifting our Y-band down, we completely step over the boat wake!
+  const splashYTop = Math.min(height - 1, estimatedWaterlineY + 5);
+  const splashYBot = Math.min(height - 1, estimatedWaterlineY + 35);
   
   let splashCounts = [];
   
