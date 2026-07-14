@@ -452,16 +452,15 @@ export async function analyzeJump(frames, calibPoints = [], onProgress = () => {
   // --- Scan Backwards from Splash to Peak ---
   // The user identified that looking at a single frame (-10 offset) is fragile.
   // Instead, we know the biggest splash is at fullLandingFrame.
-  // We scan backwards frame-by-frame from the splash towards the peak.
-  // We score all valid skier silhouettes.
-  // The frame with the highest silhouette score will naturally be the moment
-  // the skier is most clearly visible at the waterline, right before the splash obscures them.
-
+  // We scan backwards frame-by-frame from the splash (fullLandingFrame).
+  // We use a fixed window of up to 80 frames backwards (approx 1.3 seconds)
+  // rather than relying on peakFrame, since the peak can be hijacked by a massive splash.
+  
+  const scanStartFrame = fullLandingFrame !== null ? Math.min(totalFrames - 1, fullLandingFrame + 10) : Math.min(safeContactFrame + 15, totalFrames - 1);
+  const scanEndFrame = Math.max(0, scanStartFrame - 80);
+  
   const yTop = Math.max(0, estimatedWaterlineY - Math.floor(height * 0.22));
   const yBot = Math.min(height - 1, estimatedWaterlineY + 20);
-  
-  const scanStartFrame = fullLandingFrame !== null ? fullLandingFrame : Math.min(safeContactFrame + 15, totalFrames - 1);
-  const scanEndFrame = peakFrame.frame;
   
   let bestGlobalScore = 0;
   let bestLandingX = null;
@@ -505,7 +504,10 @@ export async function analyzeJump(frames, calibPoints = [], onProgress = () => {
           const distToWaterline = Math.abs(comp.maxY - estimatedWaterlineY);
           
           if (compAspect > 1.2 && distToWaterline < 40) {
-            candidates.push(comp);
+            // Prevent picking the skier on the takeoff ramp
+            if (Math.abs(comp.cx - rampX) > 80) {
+              candidates.push(comp);
+            }
           }
         }
       }
