@@ -412,14 +412,15 @@ export async function analyzeJump(frames, onProgress = () => {}) {
   const DIFF_THRESH   = 20;
   const MIN_BLOB_AREA = 200;   // skip tiny noise
   const MAX_BLOB_AREA = 50000; // skip huge water reflections
-  const MATCH_RADIUS  = 120;   // px: max blob centroid jump between frames for same track
-  const MAX_GAP       = 3;     // frames a track may be missing before it's closed
-  const MIN_TRACK_LEN = 8;     // minimum frames to be a valid track
+  const MATCH_RADIUS  = 150;   // px: max blob centroid jump between frames for same track
+  const MAX_GAP       = 4;     // frames a track may be missing before it's closed
+  const MIN_TRACK_LEN = 4;     // minimum frames to be a valid track
   const ROI_BOT       = Math.floor(height * 0.68); // ignore deep water area
   
   // Phase 1: find all significant blobs per frame
   const trackScanEnd = Math.min(totalFrames - 1, (safeContactFrame || totalFrames - 1) + 25);
   const tracks = [];
+  console.log('[AI] MOT start: frames 0 to', trackScanEnd, 'ROI_BOT:', ROI_BOT);
   
   for (let f = 0; f <= trackScanEnd; f++) {
     const fGray = toGrayscale(frames[f]);
@@ -483,10 +484,15 @@ export async function analyzeJump(frames, onProgress = () => {}) {
   let maxYRange   = 0;
   console.log('[AI] Total tracks:', tracks.length);
   
-  for (const tr of tracks) {
-    if (tr.points.length < MIN_TRACK_LEN) continue;
-    const cys    = tr.points.map(p => p.cy);
-    const yRange = Math.max(...cys) - Math.min(...cys);
+  // Log top 5 tracks by Y-range for diagnostics
+  const sorted = tracks
+    .filter(tr => tr.points.length >= MIN_TRACK_LEN)
+    .map(tr => { const cys = tr.points.map(p => p.cy); return { tr, yRange: Math.max(...cys) - Math.min(...cys), len: tr.points.length }; })
+    .sort((a, b) => b.yRange - a.yRange)
+    .slice(0, 5);
+  sorted.forEach((s, i) => console.log('[AI] Track', i, 'len=', s.len, 'yRange=', Math.round(s.yRange), 'cx0=', Math.round(s.tr.points[0].cx)));
+  
+  for (const { tr, yRange } of sorted) {
     if (yRange > maxYRange) { maxYRange = yRange; skierTrack = tr; }
   }
   console.log('[AI] Skier track: points=', skierTrack ? skierTrack.points.length : 0,
@@ -545,7 +551,7 @@ export async function analyzeJump(frames, onProgress = () => {}) {
   if (yRange > 20) confidence += 0.3;
   if (detectedFrames.length > 10) confidence += 0.2;
   if (initialContactFrame !== null) confidence += 0.2;
-  if (bestScore > 50) confidence += 0.3;
+  if (skierTrack && maxYRange > 50) confidence += 0.3;
   else if (landingFrame !== null) confidence += 0.1;
 
   confidence = Math.min(1, confidence);
