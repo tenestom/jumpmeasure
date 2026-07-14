@@ -456,7 +456,7 @@ export async function analyzeJump(frames, calibPoints = [], onProgress = () => {
   // We use a fixed window of up to 80 frames backwards (approx 1.3 seconds)
   // rather than relying on peakFrame, since the peak can be hijacked by a massive splash.
   
-  const scanStartFrame = fullLandingFrame !== null ? Math.min(totalFrames - 1, fullLandingFrame + 10) : Math.min(safeContactFrame + 15, totalFrames - 1);
+  const scanStartFrame = fullLandingFrame !== null ? fullLandingFrame : Math.min(safeContactFrame + 15, totalFrames - 1);
   const scanEndFrame = Math.max(0, scanStartFrame - 80);
   
   const yTop = Math.max(0, estimatedWaterlineY - Math.floor(height * 0.22));
