@@ -544,8 +544,11 @@ export async function analyzeJump(frames, calibPoints = [], onProgress = () => {
   }
   const baselineNoise = noiseCount > 0 ? noiseSum / noiseCount : 0;
   
-  // Dynamic threshold: baseline noise + 10% of the true splash, or at least 15 pixels above noise
-  const threshold = baselineNoise + Math.max(15, (maxSplash - baselineNoise) * 0.15);
+  // Dynamic threshold: We want to wait until the splash is TRULY dead.
+  // 15% of a massive peak splash is still a very visible splash!
+  // We should just use baseline noise + a small absolute pixel buffer (e.g., 20 pixels)
+  // or a tiny percentage (2%) just to avoid micro-fluctuations.
+  const threshold = baselineNoise + Math.max(20, (maxSplash - baselineNoise) * 0.02);
   
   console.log(`[AI] Splash threshold dynamically set to ${Math.round(threshold)} (max=${maxSplash}, baseline=${Math.round(baselineNoise)})`);
   
