@@ -399,172 +399,180 @@ export async function analyzeJump(frames, onProgress = () => {}) {
     }
   }
   
-  // STEP 2: FIND SKIER USING SHAPE-SCORED MULTI-FRAME SCAN
-  // Scan frames in a window around the estimated landing.
-  // For each frame: background-subtract → find blobs → score by silhouette shape.
-  // The skier has: correct size, tall aspect ratio, ski-signature (wider at bottom).
-  // Store all detections; measurement frame = frame with highest score.
+  // STEP 2: TRAJECTORY FIT + RAW GRAYSCALE SILHOUETTE SEARCH
+  // 1. Fit linear model to post-peak tracking data → predicted position per frame
+  // 2. For each frame in landing window: search raw grayscale at predicted position
+  // 3. Score: dark vertical silhouette against lighter surroundings (no diff needed)
   
   let blobBox = null;
   const allDetections = new Array(totalFrames).fill(null);
   
-  // Get last known flight blob for visualization
-  let predX = lastKnownX || (peakFrame ? peakFrame.cx : width / 2);
-  let predBlobFrame = -1;
-  for (let f = Math.max(0, safeContactFrame - 15); f <= safeContactFrame; f++) {
-    if (f < trackingData.length && trackingData[f].detected && trackingData[f].area < 8000) {
-      predX = trackingData[f].cx;
-      predBlobFrame = f;
-    }
-  }
-  const lastFlightBlob = predBlobFrame >= 0 ? trackingData[predBlobFrame] : null;
-  const predBlobBox = lastFlightBlob ? {
-    x: lastFlightBlob.bbox.x / width,
-    y: lastFlightBlob.bbox.y / height,
-    w: lastFlightBlob.bbox.w / width,
-    h: lastFlightBlob.bbox.h / height,
-  } : null;
-  console.log('[AI] Last flight blob: frame', predBlobFrame, 'cx=', predX);
+  // Collect reliable post-peak tracking points (detected, reasonable size)
+  const reliablePostPeak = trackingData.filter(t =>
+    t.detected &&
+    t.frame >= peakFrame.frame &&
+    t.frame <= Math.min(safeContactFrame, totalFrames - 1) &&
+    t.area < 12000 && t.area > 80
+  );
+  console.log('[AI] Reliable post-peak points:', reliablePostPeak.length);
   
-  // Search zone X: from ramp exclusion to opposite side
+  // Fit linear trajectory to cx and cy
+  let trajCxSlope = 0, trajCxIntercept = peakFrame.cx;
+  let trajCySlope = 3, trajCyIntercept = peakFrame.cy;
+  if (reliablePostPeak.length >= 3) {
+    const fv = reliablePostPeak.map(t => t.frame);
+    const cxFit = fitLinear1D(fv, reliablePostPeak.map(t => t.cx));
+    const cyFit = fitLinear1D(fv, reliablePostPeak.map(t => t.cy));
+    trajCxSlope = cxFit.slope; trajCxIntercept = cxFit.intercept;
+    trajCySlope = cyFit.slope; trajCyIntercept = cyFit.intercept;
+    console.log('[AI] Trajectory fit: cx =', trajCxSlope.toFixed(2), '* f +', trajCxIntercept.toFixed(0),
+      ' | cy =', trajCySlope.toFixed(2), '* f +', trajCyIntercept.toFixed(0));
+  }
+  
+  // Last reliable flight blob for visualization
+  const lastFlightBlob = reliablePostPeak.length > 0 ?
+    reliablePostPeak[reliablePostPeak.length - 1] : null;
+  const predBlobBox = lastFlightBlob ? {
+    x: lastFlightBlob.bbox.x / width, y: lastFlightBlob.bbox.y / height,
+    w: lastFlightBlob.bbox.w / width, h: lastFlightBlob.bbox.h / height,
+  } : null;
+  
+  // Waterline Y: use ramp base if detected, else estimate from trajectory
+  const estimatedWaterlineY = rampNativeY ||
+    (lastFlightBlob
+      ? Math.round(lastFlightBlob.cy + trajCySlope * (safeContactFrame - lastFlightBlob.frame))
+      : Math.floor(height * 0.25));
+  console.log('[AI] Estimated waterline Y:', estimatedWaterlineY);
+  
+  // Ramp exclusion zone (X)
   const rampEdge = rampIsRight
     ? (rampNativeStartX || Math.floor(width * 0.7))
-    : (rampNativeEndX || Math.floor(width * 0.3));
-  const searchXStart = rampIsRight ? 0 : rampEdge + rampFullWidth;
-  const searchXEnd   = rampIsRight ? rampEdge - rampFullWidth : width;
+    : (rampNativeEndX  || Math.floor(width * 0.3));
   
-  // Search zone Y: detect waterline from background frame
-  // The waterline = strongest horizontal edge across full width (shoreline vs water).
-  // Skier body is ABOVE the waterline (head at top, skis touch water at bottom).
-  let detectedWaterlineY = findWaterline(bgGray, width, height);
+  // Raw grayscale scan constants
+  const SEARCH_HALF_W = 100; // search ±100px around predicted cx
+  const SKIER_MAX_H   = Math.floor(height * 0.22);
+  const DARK_MIN      = 8;   // min brightness contrast (outer-inner)
+  const DARK_ROWS_MIN = 40;  // min height of dark region in pixels
   
-  // Sanity check: if ramp was detected its base is AT the waterline.
-  // If our detected waterline is far below rampNativeY, prefer rampNativeY.
-  if (rampNativeY && Math.abs(detectedWaterlineY - rampNativeY) > height * 0.10) {
-    console.log('[AI] Waterline sanity: detected', detectedWaterlineY, 'vs ramp', rampNativeY, '→ using ramp');
-    detectedWaterlineY = rampNativeY;
-  }
-  
-  const skierHeight = Math.floor(height * 0.22); // approx max skier height in frame
-  const searchYTop = Math.max(0, detectedWaterlineY - skierHeight); // above waterline
-  const searchYBot = Math.min(height - 1, detectedWaterlineY + Math.floor(height * 0.04)); // just below
-  
-  console.log('[AI] Waterline Y:', detectedWaterlineY, '→ search Y:', searchYTop, '-', searchYBot);
-  
-  // Skier size constraints (native pixels)
-  const MIN_W = 15, MAX_W = 120;
-  const MIN_H = 50, MAX_H = 250;
-  const DIFF_THRESHOLD = 20;
-  
-  // Scan window: fullLandingFrame - 20 to fullLandingFrame + 5
   const scanFrom = Math.max(0, (fullLandingFrame || safeContactFrame) - 20);
   const scanTo   = Math.min(totalFrames - 1, (fullLandingFrame || safeContactFrame) + 5);
   
-  let bestScore = -1;
-  let bestFrame = landingFrame;
-  let bestLandingX = null;
+  let bestScore = -1, bestFrame = landingFrame, bestLandingX = null;
   
   for (let f = scanFrom; f <= scanTo; f++) {
+    // Predict cx from trajectory
+    const predCx = Math.round(Math.max(0, Math.min(width - 1,
+      trajCxSlope * f + trajCxIntercept)));
+    
+    // Y search band: from waterline up by skier height, to waterline + small margin
+    const yTop   = Math.max(0, estimatedWaterlineY - SKIER_MAX_H);
+    const yBot   = Math.min(height - 1, estimatedWaterlineY + Math.floor(height * 0.04));
+    const stripH = yBot - yTop;
+    if (stripH < 20) continue;
+    
+    // X search band around predicted cx
+    const xLeft  = Math.max(0, predCx - SEARCH_HALF_W);
+    const xRight = Math.min(width - 1, predCx + SEARCH_HALF_W);
+    
     const fGray = toGrayscale(frames[f]);
-    const fDiff = new Uint8Array(width * height);
-    for (let i = 0; i < fGray.length; i++) {
-      fDiff[i] = Math.min(255, Math.abs(fGray[i] - bgGray[i]));
+    
+    // Column mean brightness in search band
+    const colBright = new Float32Array(width).fill(0);
+    for (let x = xLeft; x <= xRight; x++) {
+      let s = 0;
+      for (let y = yTop; y <= yBot; y++) s += fGray[y * width + x];
+      colBright[x] = s / stripH;
     }
     
-    // Find all blobs in search zone
-    const visited = new Uint8Array(width * height);
-    const frameCandidates = [];
+    // Slide windows of varying widths to find a dark vertical silhouette
+    let frameScore = -1, frameBestBox = null;
+    const surround = 20; // columns on each side for contrast measurement
     
-    for (let y = searchYTop; y < searchYBot; y++) {
-      for (let x = searchXStart; x < searchXEnd; x++) {
-        const idx = y * width + x;
-        if (visited[idx] || fDiff[idx] < DIFF_THRESHOLD) continue;
-        const comp = floodFill(fDiff, visited, width, height, x, y, DIFF_THRESHOLD,
-          searchYTop, searchYBot, searchXStart, searchXEnd);
-        if (comp.area < 50) continue; // skip tiny noise
-        frameCandidates.push(comp);
+    for (let w = 15; w <= 80; w += 3) {
+      for (let x0 = xLeft + surround; x0 <= xRight - w - surround; x0++) {
+        // Skip ramp zone
+        const cxMid = x0 + Math.floor(w / 2);
+        if (rampIsRight && cxMid > rampEdge - rampFullWidth) continue;
+        if (!rampIsRight && cxMid < rampEdge + rampFullWidth) continue;
+        
+        // Column contrast: inner vs outer
+        let inner = 0;
+        for (let dx = 0; dx < w; dx++) inner += colBright[x0 + dx];
+        inner /= w;
+        
+        let outer = 0, outN = 0;
+        for (let dx = -surround; dx < 0 && x0 + dx >= xLeft; dx++) {
+          outer += colBright[x0 + dx]; outN++;
+        }
+        for (let dx = w; dx < w + surround && x0 + dx <= xRight; dx++) {
+          outer += colBright[x0 + dx]; outN++;
+        }
+        if (outN === 0 || outer / outN - inner < DARK_MIN) continue;
+        const darkness = outer / outN - inner;
+        
+        // Row-by-row: count vertically dark rows in this strip
+        let darkRows = 0, topY2 = yBot, botY2 = yTop;
+        for (let y = yTop; y <= yBot; y++) {
+          let rowIn = 0;
+          for (let dx = 0; dx < w; dx++) rowIn += fGray[y * width + x0 + dx];
+          rowIn /= w;
+          let rowOut = 0, rowN = 0;
+          for (let dx = -surround; dx < 0 && x0 + dx >= 0; dx++) {
+            rowOut += fGray[y * width + x0 + dx]; rowN++;
+          }
+          for (let dx = w; dx < w + surround && x0 + dx < width; dx++) {
+            rowOut += fGray[y * width + x0 + dx]; rowN++;
+          }
+          if (rowN === 0) continue;
+          if (rowOut / rowN - rowIn > DARK_MIN) {
+            darkRows++; topY2 = Math.min(topY2, y); botY2 = Math.max(botY2, y);
+          }
+        }
+        if (darkRows < DARK_ROWS_MIN) continue;
+        
+        const blobH = botY2 - topY2 + 1;
+        const aspect = blobH / w;
+        if (aspect < 1.2 || aspect > 6) continue;
+        
+        const score = darkness * (darkRows / stripH) * Math.min(aspect / 2.5, 1) * 100;
+        if (score > frameScore) {
+          frameScore = score;
+          frameBestBox = { minX: x0, minY: topY2, maxX: x0 + w, maxY: botY2, w, h: blobH };
+        }
       }
     }
     
-    // Score each blob by silhouette criteria
-    let frameScore = -1;
-    let frameBlob = null;
-    
-    for (const c of frameCandidates) {
-      const bw = c.w, bh = c.h;
-      if (bw < MIN_W || bw > MAX_W || bh < MIN_H || bh > MAX_H) continue;
-      
-      const aspectRatio = bh / bw; // should be ~1.5-5 for a standing person
-      if (aspectRatio < 1.0 || aspectRatio > 6.0) continue;
-      
-      // Ski signature: measure diff-pixel width at bottom 25% vs middle 40-60%
-      const midY    = Math.round(c.minY + bh * 0.5);
-      const bottomY = Math.round(c.minY + bh * 0.85);
-      let midW = 0, botW = 0;
-      for (let x = c.minX; x <= c.maxX; x++) {
-        if (fDiff[midY    * width + x] >= DIFF_THRESHOLD) midW++;
-        if (fDiff[bottomY * width + x] >= DIFF_THRESHOLD) botW++;
-      }
-      const skiRatio = midW > 0 ? botW / midW : 0;
-      // skiRatio > 1 means bottom wider than middle = ski signature
-      
-      // Roundedness at top: top 10% width should be < body width
-      const topY = Math.round(c.minY + bh * 0.1);
-      let topW = 0;
-      for (let x = c.minX; x <= c.maxX; x++) {
-        if (fDiff[topY * width + x] >= DIFF_THRESHOLD) topW++;
-      }
-      const topRatio = bw > 0 ? topW / bw : 1; // <1 means tapered top = helmet
-      
-      // Composite score (higher = more skier-like)
-      let score = 0;
-      score += Math.min(aspectRatio / 2.5, 1.0) * 30;       // aspect ratio (tall)
-      score += Math.min(skiRatio, 2.0) / 2.0 * 25;          // ski signature
-      score += (1 - Math.min(topRatio, 1)) * 20;            // rounded top
-      score += Math.min(c.area / 500, 1.0) * 15;            // sufficient size
-      score += (bw >= 25 && bw <= 80) ? 10 : 0;             // right width range
-      
-      if (score > frameScore) {
-        frameScore = score;
-        frameBlob = c;
-      }
-    }
-    
-    if (frameBlob && frameScore > 30) {
-      const detection = {
+    if (frameBestBox && frameScore > 15) {
+      const nativeX = rampIsRight ? frameBestBox.maxX : frameBestBox.minX;
+      const det = {
         score: frameScore,
         box: {
-          x: frameBlob.minX / width,
-          y: frameBlob.minY / height,
-          w: frameBlob.w / width,
-          h: frameBlob.h / height,
+          x: frameBestBox.minX / width, y: frameBestBox.minY / height,
+          w: frameBestBox.w / width,   h: frameBestBox.h / height,
         },
-        nativeX: rampIsRight ? frameBlob.maxX : frameBlob.minX, // ramp-side edge
-        nativeBox: frameBlob,
+        nativeX,
       };
-      allDetections[f] = detection;
-      
+      allDetections[f] = det;
       if (frameScore > bestScore) {
-        bestScore = frameScore;
-        bestFrame = f;
-        bestLandingX = detection.nativeX;
-        blobBox = detection.box;
+        bestScore = frameScore; bestFrame = f;
+        bestLandingX = nativeX; blobBox = det.box;
       }
     }
   }
   
-  // Update landing frame and X from best detection
+  // Best detection → measurement frame and X
   if (bestLandingX !== null) {
-    landingFrame = bestFrame;
-    landingX = bestLandingX;
-    console.log('[AI] Best skier frame:', bestFrame, 'score:', bestScore.toFixed(1), 'x:', bestLandingX);
+    landingFrame = bestFrame; landingX = bestLandingX;
+    console.log('[AI] Best skier (raw gray): frame', bestFrame,
+      'score', bestScore.toFixed(1), 'x', bestLandingX);
   } else {
-    // Fallback
-    landingX = lastKnownX || width / 2;
-    console.log('[AI] No skier found by shape — fallback x:', Math.round(landingX));
+    landingX = (lastFlightBlob ? lastFlightBlob.cx : null) || width / 2;
+    console.log('[AI] No raw-gray skier found — fallback x:', Math.round(landingX));
   }
   
   console.log('[AI] Final: frame', landingFrame, 'x:', Math.round(landingX));
+  
 
   // Normalize landing X to 0..1
   const landingXNorm = landingX !== null ? landingX / width : null;
@@ -793,6 +801,24 @@ function findWaterline(bgGray, width, height) {
   
   console.log('[AI] Waterline (var_above - var_below): Y=', bestY, 'score=', bestScore.toFixed(1));
   return bestY;
+}
+
+/**
+ * Simple 1D linear regression: fit y = slope*x + intercept.
+ */
+function fitLinear1D(xs, ys) {
+  const n = xs.length;
+  if (n < 2) return { slope: 0, intercept: ys[0] || 0 };
+  let sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0;
+  for (let i = 0; i < n; i++) {
+    sumX += xs[i]; sumY += ys[i];
+    sumXY += xs[i] * ys[i]; sumX2 += xs[i] * xs[i];
+  }
+  const denom = n * sumX2 - sumX * sumX;
+  if (Math.abs(denom) < 1e-9) return { slope: 0, intercept: sumY / n };
+  const slope = (n * sumXY - sumX * sumY) / denom;
+  const intercept = (sumY - slope * sumX) / n;
+  return { slope, intercept };
 }
 
 /**
