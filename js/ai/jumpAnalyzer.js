@@ -493,11 +493,12 @@ export async function analyzeJump(frames, calibPoints = [], onProgress = () => {
   const scanStartFrame = fullLandingFrame !== null ? fullLandingFrame : Math.min(safeContactFrame + 15, totalFrames - 1);
   const scanEndFrame = Math.max(0, scanStartFrame - 80);
   
-  // We completely abandon the concept of a "waterline" (which relies on ramp or calibration).
-  // Instead, we use the EXACT physical Y-coordinate where the massive splash was observed (splashY).
-  // The splash expands a bit up and down from the skis.
-  const splashYTop = splashY !== null ? Math.max(0, splashY - 20) : Math.floor(height * 0.4);
-  const splashYBot = splashY !== null ? Math.min(height - 1, splashY + 20) : Math.floor(height * 0.6);
+  // We use the EXACT physical Y-coordinate where the massive splash was observed (splashY).
+  // IMPORTANT: The boat wake is slightly ABOVE the skier's landing (further away).
+  // To avoid the boat wake interfering with our splash count, we look only at the 
+  // LOWER half of the splash (closer to the camera).
+  const splashYTop = splashY !== null ? Math.min(height - 1, splashY) : Math.floor(height * 0.4);
+  const splashYBot = splashY !== null ? Math.min(height - 1, splashY + 30) : Math.floor(height * 0.6);
   
   let splashCounts = [];
   
