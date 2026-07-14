@@ -507,10 +507,30 @@ export async function analyzeJump(frames, calibPoints = [], onProgress = () => {
   let bestBlobBox = null;
   
   // We have the splash counts going backwards in time.
-  // Find the first frame where the splash count drops below a tiny threshold (e.g., 10 pixels).
+  // Find the maximum splash in our window.
+  let maxSplash = 0;
+  for (let s of splashCounts) {
+    if (s.count > maxSplash) maxSplash = s.count;
+  }
+  
+  // Calculate a baseline noise level from the EARLIEST 15 frames in the scan (which should be before the jump)
+  let noiseSum = 0;
+  let noiseCount = 0;
+  for (let i = splashCounts.length - 1; i >= Math.max(0, splashCounts.length - 15); i--) {
+     noiseSum += splashCounts[i].count;
+     noiseCount++;
+  }
+  const baselineNoise = noiseCount > 0 ? noiseSum / noiseCount : 0;
+  
+  // Dynamic threshold: baseline noise + 10% of the true splash, or at least 15 pixels above noise
+  const threshold = baselineNoise + Math.max(15, (maxSplash - baselineNoise) * 0.15);
+  
+  console.log(`[AI] Splash threshold dynamically set to ${Math.round(threshold)} (max=${maxSplash}, baseline=${Math.round(baselineNoise)})`);
+  
+  // Find the first frame (going backwards) where the splash count drops below the dynamic threshold.
   // The frame RIGHT BEFORE that (chronologically after) is the exact landing frame!
   for (let i = 0; i < splashCounts.length; i++) {
-    if (splashCounts[i].count < 10) {
+    if (splashCounts[i].count <= threshold) {
        const landingData = i > 0 ? splashCounts[i - 1] : splashCounts[i];
        bestLandingFrame = landingData.frame;
        bestLandingX = landingData.avgX !== null ? landingData.avgX : splashX;
