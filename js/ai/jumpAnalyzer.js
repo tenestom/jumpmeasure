@@ -432,19 +432,8 @@ export async function analyzeJump(frames, calibPoints = [], onProgress = () => {
     }
   }
 
-  // --- Dynamic Constraints Based on Peak ---
-  // The skier lands shortly after the peak, in the direction of the jump.
-  // The boat is typically much further ahead. We completely exclude the boat
-  // by limiting the search radius from the peak frame's X position.
-  const MAX_TRAVEL_FROM_PEAK = 400; // Max pixels a skier travels horizontally from peak to landing
-  if (jumpDirection === 1) { // Left to right
-    searchStartX = Math.max(searchStartX, peakFrame.cx - 50);
-    searchEndX = Math.min(searchEndX, peakFrame.cx + MAX_TRAVEL_FROM_PEAK);
-  } else if (jumpDirection === -1) { // Right to left
-    searchStartX = Math.max(searchStartX, peakFrame.cx - MAX_TRAVEL_FROM_PEAK);
-    searchEndX = Math.min(searchEndX, peakFrame.cx + 50);
-  }
-  console.log(`[AI] Adjusted bounds for flight trajectory (excluding boat): ${searchStartX} - ${searchEndX}`);
+  // --- Peak-based constraints removed per user request ---
+  // We rely entirely on finding visual candidates and sorting by distance to ramp.
 
 
   // --- Exclude Ramp Region ---
@@ -465,7 +454,7 @@ export async function analyzeJump(frames, calibPoints = [], onProgress = () => {
   const yTop = Math.max(0, estimatedWaterlineY - Math.floor(height * 0.22));
   const yBot = Math.min(height - 1, estimatedWaterlineY + 20);
   
-  let bestScore = -1, bestLandingX = null;
+  let candidates = [];
   
   // Use the previously identified measurement frame (or fallback)
   const scanFrame = landingFrame;
@@ -498,19 +487,43 @@ export async function analyzeJump(frames, calibPoints = [], onProgress = () => {
         const distToWaterline = Math.abs(comp.maxY - estimatedWaterlineY);
         
         if (compAspect > 1.2 && distToWaterline < 40) {
-          // Score = Area * AspectRatio (rewards tall, solid objects)
-          const score = comp.area * compAspect;
-          
-          if (score > bestScore) {
-            bestScore = score;
-            const nativeX = rampIsRight ? comp.maxX : comp.minX;
-            bestLandingX = nativeX;
-            blobBox = { x: comp.minX / width, y: comp.minY / height, w: comp.w / width, h: comp.h / height };
-            allDetections[scanFrame] = { score, box: blobBox };
-          }
+          // Valid candidate!
+          candidates.push(comp);
         }
       }
     }
+  }
+
+  let bestLandingX = null;
+  let bestScore = 0;
+
+  // --- Pick the candidate closest to the ramp ---
+  // The physical layout is always Ramp -> Skier -> Boat.
+  // Therefore, among all dark vertical shapes (which might include boat pieces),
+  // the skier is ALWAYS the one closest to the ramp.
+  if (candidates.length > 0) {
+    // Determine the X-coordinate of the ramp
+    let rampX;
+    if (typeof rampNativeStartX !== 'undefined' && typeof rampNativeEndX !== 'undefined') {
+      rampX = rampIsRight ? rampNativeStartX : rampNativeEndX;
+    } else {
+      // If ramp wasn't detected, assume it's at the edge of the screen
+      rampX = rampIsRight ? width : 0;
+    }
+    
+    // Sort candidates by distance to the ramp (closest first)
+    candidates.sort((a, b) => {
+      const distA = Math.abs(a.cx - rampX);
+      const distB = Math.abs(b.cx - rampX);
+      return distA - distB;
+    });
+    
+    const bestComp = candidates[0];
+    bestLandingX = rampIsRight ? bestComp.maxX : bestComp.minX;
+    bestScore = bestComp.area * (bestComp.h / Math.max(1, bestComp.w));
+    
+    blobBox = { x: bestComp.minX / width, y: bestComp.minY / height, w: bestComp.w / width, h: bestComp.h / height };
+    allDetections[scanFrame] = { score: bestScore, box: blobBox };
   }
 
   // --- Determine final landing position ---
