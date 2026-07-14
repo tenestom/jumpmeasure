@@ -393,41 +393,33 @@ function toGrayscale(imageData) {
  * Find the largest motion blob in a region of the difference image.
  * Uses a simple connected-component approach via flood fill.
  */
-function findLargestBlob(diff, width, height, roiTop, roiBottom, threshold, roiLeft = 0, roiRight = null) {
+function findAllBlobs(diff, width, height, roiTop, roiBottom, threshold, roiLeft = 0, roiRight = null) {
   if (roiRight === null) roiRight = width;
-  // Threshold the diff image in the ROI
   const visited = new Uint8Array(width * height);
-  
-  let bestBlob = { detected: false, cx: 0, cy: 0, area: 0, top: height, bbox: null };
+  const blobs = [];
   
   for (let y = roiTop; y < roiBottom; y++) {
     for (let x = roiLeft; x < roiRight; x++) {
       const idx = y * width + x;
       if (visited[idx] || diff[idx] < threshold) continue;
       
-      // Flood fill to find connected component (constrained to ROI)
       const component = floodFill(diff, visited, width, height, x, y, threshold, roiTop, roiBottom, roiLeft, roiRight);
       
-      if (component.area > bestBlob.area) {
-        // Filter out very flat/wide shapes (waves, wake)
+      if (component.area > 20) {
         const aspect = component.h / Math.max(component.w, 1);
-        if (aspect < 0.08 && component.area < 2000) continue;  // Skip flat noise
-        
-        bestBlob = {
+        if (aspect < 0.08 && component.area < 2000) continue;
+        blobs.push({
           detected: true,
-          cx: component.cx,
-          cy: component.cy,
+          cx: component.cx, cy: component.cy,
           area: component.area,
           top: component.minY,
-          w: component.w,
-          h: component.h,
+          w: component.w, h: component.h,
           bbox: { x: component.minX, y: component.minY, w: component.w, h: component.h }
-        };
+        });
       }
     }
   }
-  
-  return bestBlob;
+  return blobs.sort((a,b) => b.area - a.area);
 }
 
 /**
