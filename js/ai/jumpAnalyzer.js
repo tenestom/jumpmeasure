@@ -213,6 +213,7 @@ export async function analyzeJump(frames, calibPoints = [], onProgress = () => {
   );
   
   let splashX = null;
+  let splashY = null;
   if (postPeakDetected.length > 0) {
     // Find frame with maximum cy (lowest point in image = full water contact)
     const maxCyFrame = postPeakDetected.reduce((best, t) => 
@@ -220,6 +221,7 @@ export async function analyzeJump(frames, calibPoints = [], onProgress = () => {
     );
     fullLandingFrame = maxCyFrame.frame;
     splashX = maxCyFrame.cx;
+    splashY = maxCyFrame.cy;
   }
   
   // Apply offset: go back 10 frames = rear ski tip contact
@@ -426,10 +428,14 @@ export async function analyzeJump(frames, calibPoints = [], onProgress = () => {
   }
   
   if (estimatedWaterlineY === null) {
+    // Rely completely on the physical splash tracker's lowest point (splashY) if available,
+    // otherwise fallback to the lowest point of any tracked flight blob,
+    // otherwise fallback to the ramp base (if detected, though unreliable),
+    // otherwise fallback to 25% of screen height.
     const skierCys = trackingData.filter(t => t.detected && t.frame <= safeContactFrame).map(t => t.cy);
-    estimatedWaterlineY = rampNativeY ||
-      (skierCys.length > 0 ? Math.max(...skierCys) : Math.floor(height * 0.25));
-    console.log('[AI] Estimated waterline Y from heuristics:', estimatedWaterlineY);
+    estimatedWaterlineY = splashY || 
+      (skierCys.length > 0 ? Math.max(...skierCys) : (rampNativeY || Math.floor(height * 0.25)));
+    console.log('[AI] Estimated waterline Y from heuristics (splashY fallback):', estimatedWaterlineY);
   }
 
   // --- Define X Search Bounds ---
