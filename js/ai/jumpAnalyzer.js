@@ -26,7 +26,7 @@
  *   trajectory: {frame: number, x: number, y: number}[]
  * }>}
  */
-export async function analyzeJump(frames, onProgress = () => {}) {
+export async function analyzeJump(frames, calibPoints = [], onProgress = () => {}) {
   if (!frames || frames.length < 10) {
     throw new Error('Need at least 10 frames for analysis');
   }
@@ -399,120 +399,114 @@ export async function analyzeJump(frames, onProgress = () => {}) {
     }
   }
   
-  // STEP 2: TRAJECTORY FIT + TARGETED CONFIRMATION SCAN
-  // The blob tracker in STEP 1 already computed a blob per frame in trackingData.
-  // During flight the blob is the skier. We fit its trajectory and confirm at
-  // the measurement frame with a small diff-blob scan — no full re-scan needed.
-  
-  let blobBox   = null;
+  // STEP 2: FULL-WIDTH SILHOUETTE SCAN (RAW GRAYSCALE)
+  // No motion tracking or trajectory prediction used.
+  // We scan across the waterline at the identified landing frame,
+  // looking for a dark, high-aspect-ratio (vertical) silhouette.
+  // Search boundaries are restricted by user calibration points if available,
+  // and we exclude the ramp area to avoid false positives.
+
+  let blobBox = null;
   let predBlobBox = null;
   const allDetections = new Array(totalFrames).fill(null);
-  
-  // --- Build allDetections from trackingData (for trajectory visualization) ---
-  for (const t of trackingData) {
-    if (t.detected && t.bbox) {
-      allDetections[t.frame] = {
-        score: 50,
-        box: { x: t.bbox.x / width, y: t.bbox.y / height,
-               w: t.bbox.w / width, h: t.bbox.h / height },
-      };
-    }
-  }
-  
+
   // --- Waterline estimate ---
   // Ramp base is the best reference; else use max cy of tracked flight blobs.
   const skierCys = trackingData.filter(t => t.detected && t.frame <= safeContactFrame).map(t => t.cy);
   const estimatedWaterlineY = rampNativeY ||
     (skierCys.length > 0 ? Math.max(...skierCys) : Math.floor(height * 0.25));
   console.log('[AI] Estimated waterline Y:', estimatedWaterlineY);
+
+  // --- Define X Search Bounds ---
+  let searchStartX = 0;
+  let searchEndX = width - 1;
+
+  if (calibPoints && calibPoints.length >= 2) {
+    // If calibration points exist, use them as strict boundaries
+    const calibXs = calibPoints.map(p => p.pixelX);
+    searchStartX = Math.max(0, Math.floor(Math.min(...calibXs)));
+    searchEndX = Math.min(width - 1, Math.ceil(Math.max(...calibXs)));
+    console.log(`[AI] Bounding search to calibration zone: ${searchStartX} - ${searchEndX}`);
+  }
+
+  // --- Exclude Ramp Region ---
+  // If we found the ramp, avoid searching inside it
+  if (typeof rampNativeStartX !== 'undefined' && typeof rampNativeEndX !== 'undefined') {
+    if (rampIsRight) {
+      // Ramp is on the right, skier lands to the left of it
+      searchEndX = Math.min(searchEndX, rampNativeStartX - 50); // 50px safety margin
+    } else {
+      // Ramp is on the left, skier lands to the right of it
+      searchStartX = Math.max(searchStartX, rampNativeEndX + 50);
+    }
+    console.log(`[AI] Adjusted for ramp exclusion: ${searchStartX} - ${searchEndX}`);
+  }
+
+  // --- Scan the Landing Frame ---
+  // We look in a vertical window around the waterline.
+  const yTop = Math.max(0, estimatedWaterlineY - Math.floor(height * 0.22));
+  const yBot = Math.min(height - 1, estimatedWaterlineY + 20);
   
-  // --- Post-peak trajectory fit ---
-  const postPeakPts = trackingData.filter(t =>
-    t.detected && t.area > 80 && t.area < 15000 &&
-    t.frame >= peakFrame.frame && t.frame <= safeContactFrame
-  );
-  console.log('[AI] Post-peak flight points:', postPeakPts.length);
+  let bestScore = -1, bestLandingX = null;
   
-  let trajCxSlope = 0, trajCxIntercept = peakFrame.cx;
-  const hasTrajectory = postPeakPts.length >= 3;
-  if (hasTrajectory) {
-    const fv    = postPeakPts.map(t => t.frame);
-    const cxFit = fitLinear1D(fv, postPeakPts.map(t => t.cx));
-    trajCxSlope     = cxFit.slope;
-    trajCxIntercept = cxFit.intercept;
-    console.log('[AI] CX trajectory: slope=', trajCxSlope.toFixed(2), 'intercept=', trajCxIntercept.toFixed(0));
+  // Use the previously identified measurement frame (or fallback)
+  const scanFrame = landingFrame;
+  const fGray = toGrayscale(frames[scanFrame]);
+  const darkMask = new Uint8Array(width * height);
+  
+  // Parameters for silhouette shape
+  const DARK_THRESH = 110;   // Skier is dark
+  const MIN_BLOB_AREA = 30;  // Must be somewhat visible
+  
+  // Create a mask where dark pixels get a high value (like a diff map) so we can reuse floodFill
+  for (let i = 0; i < width * height; i++) {
+    darkMask[i] = fGray[i] < DARK_THRESH ? 255 : 0;
   }
   
-  // --- Targeted confirmation scan at each frame in landing window ---
-  // Search a narrow vertical strip (waterline zone) around predicted cx.
-  const HALF_SEARCH = hasTrajectory ? 150 : 350;
-  const yTop  = Math.max(0, estimatedWaterlineY - Math.floor(height * 0.22));
-  const yBot  = Math.min(height - 1, estimatedWaterlineY + 20);
-  const scanFrom = Math.max(0, (fullLandingFrame || safeContactFrame) - 20);
-  const scanTo   = Math.min(totalFrames - 1, (fullLandingFrame || safeContactFrame) + 5);
+  const vis = new Uint8Array(width * height);
   
-  let bestScore = -1, bestFrame = landingFrame, bestLandingX = null;
-  
-  for (let f = scanFrom; f <= scanTo; f++) {
-    const predCx = Math.round(trajCxSlope * f + trajCxIntercept);
-    const xL = Math.max(0, predCx - HALF_SEARCH);
-    const xR = Math.min(width - 1, predCx + HALF_SEARCH);
-    
-    const fGray = toGrayscale(frames[f]);
-    const fDiff = new Uint8Array(width * height);
-    for (let i = 0; i < fGray.length; i++) {
-      fDiff[i] = Math.min(255, Math.abs(fGray[i] - bgGray[i]));
-    }
-    
-    const vis = new Uint8Array(width * height);
-    let bestBlob = null, bestBlobArea = 0;
-    for (let y = yTop; y < yBot; y++) {
-      for (let x = xL; x < xR; x++) {
-        const idx = y * width + x;
-        if (vis[idx] || fDiff[idx] < 20) continue;
-        const comp = floodFill(fDiff, vis, width, height, x, y, 20, yTop, yBot, xL, xR);
-        if (comp.area > bestBlobArea && comp.area >= 80) {
-          bestBlobArea = comp.area; bestBlob = comp;
+  for (let y = yTop; y < yBot; y++) {
+    for (let x = searchStartX; x <= searchEndX; x++) {
+      const idx = y * width + x;
+      if (vis[idx] || darkMask[idx] === 0) continue;
+      
+      // Found a dark pixel, flood-fill it
+      const comp = floodFill(darkMask, vis, width, height, x, y, 128, yTop, yBot, searchStartX, searchEndX);
+      
+      if (comp.area >= MIN_BLOB_AREA) {
+        // We want a high aspect ratio (taller than it is wide)
+        const compAspect = comp.h / Math.max(1, comp.w);
+        // We want it to be anchored near the waterline
+        const distToWaterline = Math.abs(comp.maxY - estimatedWaterlineY);
+        
+        if (compAspect > 1.2 && distToWaterline < 40) {
+          // Score = Area * AspectRatio (rewards tall, solid objects)
+          const score = comp.area * compAspect;
+          
+          if (score > bestScore) {
+            bestScore = score;
+            const nativeX = rampIsRight ? comp.maxX : comp.minX;
+            bestLandingX = nativeX;
+            blobBox = { x: comp.minX / width, y: comp.minY / height, w: comp.w / width, h: comp.h / height };
+            allDetections[scanFrame] = { score, box: blobBox };
+          }
         }
       }
     }
-    
-    if (bestBlob) {
-      const nativeX = rampIsRight ? bestBlob.maxX : bestBlob.minX;
-      const score   = bestBlob.area;
-      allDetections[f] = { score,
-        box: { x: bestBlob.minX / width, y: bestBlob.minY / height,
-               w: bestBlob.w / width,   h: bestBlob.h / height } };
-      if (score > bestScore) {
-        bestScore = score; bestFrame = f;
-        bestLandingX = nativeX; blobBox = allDetections[f].box;
-      }
-    }
   }
-  
+
   // --- Determine final landing position ---
   if (bestLandingX !== null) {
-    landingFrame = bestFrame;
-    landingX     = bestLandingX;
-    console.log('[AI] Best skier blob: frame', bestFrame, 'area', bestScore, 'x', Math.round(landingX));
+    landingX = bestLandingX;
+    console.log(`[AI] Best skier silhouette: score=${Math.round(bestScore)}, x=${Math.round(landingX)}`);
   } else {
-    // Pure trajectory prediction fallback
-    const fallbackCx = Math.round(trajCxSlope * landingFrame + trajCxIntercept);
-    landingX = rampIsRight ? fallbackCx + 25 : fallbackCx - 25;
-    console.log('[AI] No blob — trajectory fallback x:', Math.round(landingX));
+    // Pure fallback if nothing was found
+    landingX = (searchStartX + searchEndX) / 2;
+    console.log(`[AI] No silhouette found — fallback x: ${Math.round(landingX)}`);
   }
+  
   console.log('[AI] Final: frame', landingFrame, 'x:', Math.round(landingX));
   
-  // predBlobBox = last reliable flight blob before measurement frame
-  const lastFlight = postPeakPts.length > 0 ? postPeakPts[postPeakPts.length - 1] : null;
-  if (lastFlight && lastFlight.bbox) {
-    predBlobBox = { x: lastFlight.bbox.x / width, y: lastFlight.bbox.y / height,
-                    w: lastFlight.bbox.w / width,  h: lastFlight.bbox.h / height };
-  }
-
-
-
-
   // Normalize landing X to 0..1
   const landingXNorm = landingX !== null ? landingX / width : null;
 

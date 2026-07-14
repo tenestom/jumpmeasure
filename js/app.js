@@ -273,7 +273,7 @@ if (aiDetectBtn) {
     }
 
     try {
-      const result = await analyzeJump(state.frames, (progress, message) => {
+      const result = await analyzeJump(state.frames, state.calibPoints, (progress, message) => {
         if (aiStatus) {
           aiStatus.textContent = `${message} (${Math.round(progress * 100)}%)`;
         }
