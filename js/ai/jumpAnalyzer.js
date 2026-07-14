@@ -500,7 +500,9 @@ export async function analyzeJump(frames, calibPoints = [], onProgress = () => {
     
     // Create a mask where dark pixels get a high value (like a diff map) so we can reuse floodFill
     for (let i = 0; i < width * height; i++) {
-      darkMask[i] = fGray[i] < DARK_THRESH ? 255 : 0;
+      const isDark = fGray[i] < DARK_THRESH;
+      const isMoving = Math.abs(fGray[i] - bgGray[i]) > 20; // Must be moving to ignore buoys
+      darkMask[i] = (isDark && isMoving) ? 255 : 0;
     }
     
     const vis = new Uint8Array(width * height);
@@ -534,8 +536,9 @@ export async function analyzeJump(frames, calibPoints = [], onProgress = () => {
       candidates.sort((a, b) => Math.abs(a.cx - rampX) - Math.abs(b.cx - rampX));
       
       const bestComp = candidates[0];
-      // Score = Area * AspectRatio
-      const score = bestComp.area * (bestComp.h / Math.max(1, bestComp.w));
+      // Score = pure Area (prioritizes mass, avoids tiny tall things like buoys winning)
+      // We still require aspect > 1.2 to ensure it's a vertical object.
+      const score = bestComp.area;
       
       if (score > bestGlobalScore) {
         bestGlobalScore = score;
