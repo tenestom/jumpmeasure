@@ -457,7 +457,7 @@ export async function analyzeJump(frames, calibPoints = [], onProgress = () => {
   // limit our search to a small window around it. This guarantees we ignore
   // buoys or stationary objects on the other side of the lake.
   if (splashX !== null) {
-    const SPLASH_RADIUS = 250; // pixels
+    const SPLASH_RADIUS = 150; // pixels (narrowed to aggressively exclude buoys)
     const origStartX = searchStartX;
     const origEndX = searchEndX;
     searchStartX = Math.max(searchStartX, Math.floor(splashX - SPLASH_RADIUS));
@@ -536,9 +536,10 @@ export async function analyzeJump(frames, calibPoints = [], onProgress = () => {
       candidates.sort((a, b) => Math.abs(a.cx - rampX) - Math.abs(b.cx - rampX));
       
       const bestComp = candidates[0];
-      // Score = pure Area (prioritizes mass, avoids tiny tall things like buoys winning)
-      // We still require aspect > 1.2 to ensure it's a vertical object.
-      const score = bestComp.area;
+      // Score = Area weighted by proximity to the splash climax
+      // This massively penalizes stationary objects that sneak into the edges of the search zone
+      const distToSplash = splashX !== null ? Math.abs(bestComp.cx - splashX) : 0;
+      const score = bestComp.area / (distToSplash + 50);
       
       if (score > bestGlobalScore) {
         bestGlobalScore = score;
