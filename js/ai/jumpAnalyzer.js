@@ -622,7 +622,7 @@ export async function analyzeJump(frames, onProgress = () => {}) {
     predBlobBox,
     frameWidth: width,
     allDetections,
-    waterlineY: detectedWaterlineY / height,  // normalized 0..1
+    waterlineY: estimatedWaterlineY / height,  // normalized 0..1
   };
 }
 
