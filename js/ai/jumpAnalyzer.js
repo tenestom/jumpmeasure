@@ -104,10 +104,10 @@ export async function analyzeJump(frames, calibPoints = [], onProgress = () => {
       
       if (person) {
          peakFrame = candidate;
-         console.log(\[AI] ML Confirmed true peak at frame \ (Y=\)\);
+         console.log(`[AI] ML Confirmed true peak at frame ${candidate.frame} (Y=${candidate.cy})`);
          break;
       } else {
-         console.log(\[AI] Rejected candidate peak at frame \ (No person found)\);
+         console.log(`[AI] Rejected candidate peak at frame ${candidate.frame} (No person found)`);
       }
     }
   } else {
