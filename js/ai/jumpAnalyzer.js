@@ -100,14 +100,23 @@ export async function analyzeJump(frames, calibPoints = [], onProgress = () => {
     onProgress(0.5, 'ML Tracking skier...');
     let currX = peakFrame.cx;
     let currY = peakFrame.cy;
+    const cropW = 300, cropH = 300;
     
-    const cropW = 300;
-    const cropH = 300;
-    const cropCanvas = document.createElement('canvas');
-    cropCanvas.width = cropW;
-    cropCanvas.height = cropH;
+    const cropCanvas = new OffscreenCanvas(cropW, cropH);
     const cropCtx = cropCanvas.getContext('2d', { willReadFrequently: true });
     
+    let velX = 0, velY = 5;
+    const prePeak = trackingData.filter(t => t.frame <= peakFrame.frame && t.detected);
+    if (prePeak.length >= 2) {
+      const p1 = prePeak[0];
+      const p2 = prePeak[prePeak.length - 1];
+      if (p2.frame > p1.frame) {
+        velX = (p2.cx - p1.cx) / (p2.frame - p1.frame);
+        velY = (p2.cy - p1.cy) / (p2.frame - p1.frame);
+      }
+    }
+    if (velY < 2) velY = 2; // ensure it drops downwards
+
     for (let f = peakFrame.frame; f < totalFrames; f++) {
       if (f % 2 === 0) {
         onProgress(0.5 + 0.3 * ((f - peakFrame.frame) / (totalFrames - peakFrame.frame)), `ML Tracking frame ${f}...`);
@@ -119,25 +128,26 @@ export async function analyzeJump(frames, calibPoints = [], onProgress = () => {
       const cropData = cropImageData(frames[f], cropX, cropY, cropW, cropH);
       cropCtx.putImageData(cropData, 0, 0);
       
-      const predictions = await mlModel.detect(cropCanvas);
-      const person = predictions.find(p => p.class === 'person');
+      const predictions = await mlModel.detect(cropCanvas, 10, 0.15);
+      const person = predictions.find(p => p.class === 'person' || p.class === 'surfboard' || p.class === 'skis' || p.class === 'boat');
       
       if (person) {
         currX = cropX + person.bbox[0] + person.bbox[2]/2;
         currY = cropY + person.bbox[1] + person.bbox[3]/2;
+        
+        if (mlTrack.length >= 1) {
+            velX = currX - mlTrack[mlTrack.length-1].cx;
+            velY = currY - mlTrack[mlTrack.length-1].cy;
+        }
+        
         mlTrack.push({ frame: f, cx: currX, cy: currY, detected: true });
         splashY = currY; 
         landingX = currX;
-        console.log(`[AI] ML Frame ${f}: Person at ${currX.toFixed(1)}, ${currY.toFixed(1)}`);
+        console.log(`[AI] ML Frame ${f}: Detected ${person.class} at ${currX.toFixed(1)}, ${currY.toFixed(1)}`);
       } else {
-        if (mlTrack.length >= 2) {
-          const p1 = mlTrack[mlTrack.length - 2];
-          const p2 = mlTrack[mlTrack.length - 1];
-          currX += (p2.cx - p1.cx);
-          currY += (p2.cy - p1.cy);
-        } else {
-          currY += 5;
-        }
+        currX += velX;
+        currY += velY;
+        
         mlTrack.push({ frame: f, cx: currX, cy: currY, detected: false });
         splashY = currY;
         landingX = currX;
