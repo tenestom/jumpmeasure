@@ -432,6 +432,21 @@ export async function analyzeJump(frames, calibPoints = [], onProgress = () => {
     }
   }
 
+  // --- Dynamic Constraints Based on Peak ---
+  // The skier lands shortly after the peak, in the direction of the jump.
+  // The boat is typically much further ahead. We completely exclude the boat
+  // by limiting the search radius from the peak frame's X position.
+  const MAX_TRAVEL_FROM_PEAK = 400; // Max pixels a skier travels horizontally from peak to landing
+  if (jumpDirection === 1) { // Left to right
+    searchStartX = Math.max(searchStartX, peakFrame.cx - 50);
+    searchEndX = Math.min(searchEndX, peakFrame.cx + MAX_TRAVEL_FROM_PEAK);
+  } else if (jumpDirection === -1) { // Right to left
+    searchStartX = Math.max(searchStartX, peakFrame.cx - MAX_TRAVEL_FROM_PEAK);
+    searchEndX = Math.min(searchEndX, peakFrame.cx + 50);
+  }
+  console.log(`[AI] Adjusted bounds for flight trajectory (excluding boat): ${searchStartX} - ${searchEndX}`);
+
+
   // --- Exclude Ramp Region ---
   // If we found the ramp, avoid searching inside it
   if (typeof rampNativeStartX !== 'undefined' && typeof rampNativeEndX !== 'undefined') {
