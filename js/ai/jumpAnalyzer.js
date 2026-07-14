@@ -524,7 +524,42 @@ export async function analyzeJump(frames, calibPoints = [], onProgress = () => {
           if (compAspect > 1.2 && distToWaterline < 40) {
             // Prevent picking the skier on the takeoff ramp
             if (Math.abs(comp.cx - rampX) > 80) {
-              candidates.push(comp);
+              
+              // --- Physics-based Stationarity Check ---
+              // Check if there was a dark object at this EXACT location 20 frames ago.
+              // The skier was flying in the air 20 frames ago, so the water should be empty.
+              // A buoy/tree/boat is stationary, so it will be dark 20 frames ago too.
+              const pastFrameIdx = Math.max(0, f - 20);
+              const pastFrameData = frames[pastFrameIdx].data;
+              let darkCount = 0;
+              let totalCount = 0;
+              const cxInt = Math.round(comp.cx);
+              const cyInt = Math.round(comp.cy);
+              
+              // Sample a small 7x7 window around the center
+              for (let py = cyInt - 3; py <= cyInt + 3; py++) {
+                for (let px = cxInt - 3; px <= cxInt + 3; px++) {
+                  if (px >= 0 && px < width && py >= 0 && py < height) {
+                    totalCount++;
+                    const idx = (py * width + px) * 4;
+                    const r = pastFrameData[idx];
+                    const g = pastFrameData[idx+1];
+                    const b = pastFrameData[idx+2];
+                    const gray = 0.299 * r + 0.587 * g + 0.114 * b;
+                    if (gray < DARK_THRESH) {
+                      darkCount++;
+                    }
+                  }
+                }
+              }
+              
+              // If less than 20% of the core is dark 20 frames ago, it's a NEW object (the skier!)
+              if (totalCount > 0 && (darkCount / totalCount) < 0.2) {
+                candidates.push(comp);
+              } else {
+                // It was already there! It's a stationary background object (buoy, tree)
+                // We completely ignore it.
+              }
             }
           }
         }
