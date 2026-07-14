@@ -595,7 +595,10 @@ export async function analyzeJump(frames, calibPoints = [], onProgress = () => {
          if (vis[idx] || darkMask[idx] === 0) continue;
          
          const comp = floodFill(darkMask, vis, width, height, x, y, 128, sStartY, sEndY, sStartX, sEndX);
-         if (comp.area >= 15) {
+         
+         // A skier is typically taller than they are wide (vertical shape).
+         // We require height to be at least 1.1x the width to filter out flat horizontal shadows.
+         if (comp.area >= 15 && comp.h >= comp.w * 1.1) {
            if (!bestSkierComp || comp.area > bestSkierComp.area) {
              bestSkierComp = comp;
            }
