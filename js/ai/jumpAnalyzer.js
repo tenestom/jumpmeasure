@@ -493,11 +493,11 @@ export async function analyzeJump(frames, calibPoints = [], onProgress = () => {
   const scanStartFrame = fullLandingFrame !== null ? fullLandingFrame : Math.min(safeContactFrame + 15, totalFrames - 1);
   const scanEndFrame = Math.max(0, scanStartFrame - 80);
   
-  // The boat drives perfectly on the waterline (Y=0).
-  // The skier swings out and lands slightly BELOW the waterline (closer to camera, Y>0).
-  // By shifting our Y-band down, we completely step over the boat wake!
-  const splashYTop = Math.min(height - 1, estimatedWaterlineY + 5);
-  const splashYBot = Math.min(height - 1, estimatedWaterlineY + 35);
+  // We completely abandon the concept of a "waterline" (which relies on ramp or calibration).
+  // Instead, we use the EXACT physical Y-coordinate where the massive splash was observed (splashY).
+  // The splash expands a bit up and down from the skis.
+  const splashYTop = splashY !== null ? Math.max(0, splashY - 20) : Math.floor(height * 0.4);
+  const splashYBot = splashY !== null ? Math.min(height - 1, splashY + 20) : Math.floor(height * 0.6);
   
   let splashCounts = [];
   
@@ -566,14 +566,58 @@ export async function analyzeJump(frames, calibPoints = [], onProgress = () => {
      bestLandingX = splashCounts[splashCounts.length - 1].avgX || splashX;
   }
   
-  // Create a synthetic blobBox for drawing the UI box (since we no longer track the black blob directly here)
-  if (bestLandingX !== null) {
-     bestBlobBox = {
-       x: (bestLandingX - 10) / width,
-       y: (estimatedWaterlineY - 30) / height,
-       w: 20 / width,
-       h: 40 / height
-     };
+  // We found the landing frame based on splash disappearance.
+  // Now, to satisfy the user's request, we step back exactly to this frame and 
+  // find the actual SKIER (dark blob) at this location to draw a perfect bounding box around them!
+  if (bestLandingX !== null && bestLandingFrame !== null) {
+     const fGray = toGrayscale(frames[bestLandingFrame]);
+     const darkMask = new Uint8Array(width * height);
+     for (let i = 0; i < width * height; i++) {
+       // Skier is dark and moving
+       darkMask[i] = (fGray[i] < 120 && Math.abs(fGray[i] - bgGray[i]) > 20) ? 255 : 0;
+     }
+     
+     const vis = new Uint8Array(width * height);
+     let bestSkierComp = null;
+     
+     // Search in a box around the splash landing zone
+     const sStartX = Math.max(0, Math.floor(bestLandingX - 50));
+     const sEndX = Math.min(width - 1, Math.floor(bestLandingX + 50));
+     const sStartY = Math.max(0, splashY - 40);
+     const sEndY = Math.min(height - 1, splashY + 20);
+     
+     for (let y = sStartY; y < sEndY; y++) {
+       for (let x = sStartX; x <= sEndX; x++) {
+         const idx = y * width + x;
+         if (vis[idx] || darkMask[idx] === 0) continue;
+         
+         const comp = floodFill(darkMask, vis, width, height, x, y, 128, sStartY, sEndY, sStartX, sEndX);
+         if (comp.area >= 15) {
+           if (!bestSkierComp || comp.area > bestSkierComp.area) {
+             bestSkierComp = comp;
+           }
+         }
+       }
+     }
+     
+     if (bestSkierComp) {
+       bestBlobBox = {
+         x: bestSkierComp.minX / width,
+         y: bestSkierComp.minY / height,
+         w: bestSkierComp.w / width,
+         h: bestSkierComp.h / height
+       };
+       // Refine landingX to the edge of the actual skier body
+       bestLandingX = rampIsRight ? bestSkierComp.maxX : bestSkierComp.minX;
+     } else {
+       // Fallback bounding box if floodfill fails
+       bestBlobBox = {
+         x: (bestLandingX - 10) / width,
+         y: (splashY - 30) / height,
+         w: 20 / width,
+         h: 40 / height
+       };
+     }
   }
 
   // --- Determine final landing position ---
