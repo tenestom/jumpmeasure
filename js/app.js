@@ -16,7 +16,7 @@ import {
 import { resizeCanvas, drawFrame, showReplayFrame, getCanvasX, applyZoom } from './rendering.js';
 import { handleInteraction, setupCalibrationListeners } from './calibration.js';
 import { startCamera, populateCameras } from './video.js';
-import { analyzeJump } from './ai/jumpAnalyzer.js';
+import { analyzeJump } from './ai/jumpAnalyzer.js?v=2';
 import { extractFrames } from './frameExtractor.js';
 
 // Store last AI result for feedback

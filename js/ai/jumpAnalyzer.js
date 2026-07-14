@@ -35,12 +35,23 @@ export async function analyzeJump(frames, calibPoints = [], onProgress = () => {
   const height = frames[0].height;
   const totalFrames = frames.length;
 
-  onProgress(0, 'Building background model...');
+  onProgress(0, 'Laddar AI-modell...');
+  let mlModel = null;
+  if (window.cocoSsd) {
+    try {
+      mlModel = await window.cocoSsd.load();
+      console.log('[AI] COCO-SSD Model loaded.');
+    } catch (e) {
+      console.warn('[AI] Failed to load COCO-SSD', e);
+    }
+  } else {
+    console.warn('[AI] window.cocoSsd is not available.');
+  }
 
-  // Step 1: Build background model from first few frames
+  onProgress(0.05, 'Building background model...');
+
   const bgFrameCount = Math.min(5, Math.floor(totalFrames * 0.1));
   const bgGray = new Float32Array(width * height);
-  
   for (let f = 0; f < bgFrameCount; f++) {
     const gray = toGrayscale(frames[f]);
     for (let i = 0; i < gray.length; i++) {
@@ -49,200 +60,105 @@ export async function analyzeJump(frames, calibPoints = [], onProgress = () => {
   }
 
   onProgress(0.1, 'Detecting motion...');
-
-  // Step 2: Frame differencing — track motion per frame
-  // We analyze the upper portion of the image where the jumper flies
-  const waterlineY = Math.floor(height * 0.55);  // Below this is mostly water
-  const roiTop = 0;
-  const roiBottom = waterlineY;
-
+  const waterlineY = Math.floor(height * 0.55);
   const trackingData = [];
   
   for (let f = 0; f < totalFrames; f++) {
     if (f % 5 === 0) {
-      onProgress(0.1 + 0.5 * (f / totalFrames), `Analyzing frame ${f + 1}/${totalFrames}...`);
-      // Yield to UI thread periodically
+      onProgress(0.1 + 0.3 * (f / totalFrames), `Analyzing motion frame ${f + 1}/${totalFrames}...`);
       await yieldToUI();
     }
-
     const gray = toGrayscale(frames[f]);
-    
-    // Compute difference from background
     const diff = new Uint8Array(width * height);
     for (let i = 0; i < gray.length; i++) {
       diff[i] = Math.min(255, Math.abs(gray[i] - bgGray[i]));
     }
-
-    // Find motion blobs in ROI (upper portion)
-    const blob = findLargestBlob(diff, width, height, roiTop, roiBottom, 25);
-    
-    trackingData.push({
-      frame: f,
-      ...blob
-    });
+    const blob = findLargestBlob(diff, width, height, 0, waterlineY, 25);
+    trackingData.push({ frame: f, ...blob });
   }
 
-  onProgress(0.6, 'Analyzing jump trajectory...');
-
-  // Step 3: Identify the flight arc
-  // During flight, the jumper's Y position reaches a minimum (highest in image)
+  onProgress(0.4, 'Analyzing jump trajectory...');
   const detectedFrames = trackingData.filter(t => t.detected);
-  
-  if (detectedFrames.length < 5) {
-    return {
-      landingFrameIndex: null,
-      landingX: null,
-      confidence: 0,
-      phases: [],
-      trajectory: trackingData.filter(t => t.detected).map(t => ({
-        frame: t.frame, x: t.cx / width, y: t.cy / height
-      })),
-      error: 'Not enough motion detected. Try ensuring the jump is visible in the recording.'
-    };
-  }
-
-  // Find the peak of the flight (minimum Y = highest point)
-  // Filter for frames where the blob is reasonably sized (not background noise)
   const significantFrames = detectedFrames.filter(t => t.area > 300);
   
   if (significantFrames.length < 3) {
     return {
-      landingFrameIndex: null,
-      landingX: null,
-      confidence: 0,
-      phases: [],
-      trajectory: detectedFrames.map(t => ({
-        frame: t.frame, x: t.cx / width, y: t.cy / height
-      })),
+      landingFrameIndex: null, landingX: null, confidence: 0, phases: [],
+      trajectory: detectedFrames.map(t => ({ frame: t.frame, x: t.cx / width, y: t.cy / height })),
       error: 'Motion detected but no clear jump pattern found.'
     };
   }
 
-  // Find peak frame (highest Y = smallest value)
-  const peakFrame = significantFrames.reduce((best, t) => 
-    t.cy < best.cy ? t : best, significantFrames[0]);
+  const peakFrame = significantFrames.reduce((best, t) => t.cy < best.cy ? t : best, significantFrames[0]);
+  console.log('[AI] peakFrame:', peakFrame.frame);
+
+  let splashY = null;
+  let landingX = null;
+  let mlTrack = [];
   
-  onProgress(0.7, 'Detecting landing point...');
-
-  // Step 4: Determine jumper direction (left-to-right or right-to-left)
-  // Compare X positions at start vs peak of flight
-  const earlyFrames = significantFrames.filter(t => t.frame < peakFrame.frame);
-  let jumpDirection = 0; // -1 = right-to-left, +1 = left-to-right
-  if (earlyFrames.length > 2) {
-    const startX = earlyFrames[0].cx;
-    const peakX = peakFrame.cx;
-    jumpDirection = peakX > startX ? 1 : -1;
-  }
-
-  // Step 5: Find initial water contact
-  // After the peak, the jumper descends. Contact = first frame where
-  // Y rises back significantly toward the waterline
-  const postPeakFrames = significantFrames.filter(t => t.frame > peakFrame.frame);
-  
-  const yValues = significantFrames.map(t => t.cy);
-  const yMin = Math.min(...yValues);
-  const yMax = Math.max(...yValues);
-  const yRange = yMax - yMin;
-
-  let initialContactFrame = null;
-  for (const t of postPeakFrames) {
-    if (t.cy > yMin + yRange * 0.5) {
-      initialContactFrame = t.frame;
-      break;
-    }
-  }
-
-  // Fallback: area spike (splash start)
-  if (initialContactFrame === null && postPeakFrames.length > 0) {
-    for (let i = 1; i < postPeakFrames.length; i++) {
-      if (postPeakFrames[i].area > postPeakFrames[i-1].area * 1.3) {
-        initialContactFrame = postPeakFrames[i].frame;
-        break;
+  if (mlModel) {
+    onProgress(0.5, 'ML Tracking skier...');
+    let currX = peakFrame.cx;
+    let currY = peakFrame.cy;
+    
+    const cropW = 300;
+    const cropH = 300;
+    const cropCanvas = document.createElement('canvas');
+    cropCanvas.width = cropW;
+    cropCanvas.height = cropH;
+    const cropCtx = cropCanvas.getContext('2d', { willReadFrequently: true });
+    
+    for (let f = peakFrame.frame; f < totalFrames; f++) {
+      if (f % 2 === 0) {
+        onProgress(0.5 + 0.3 * ((f - peakFrame.frame) / (totalFrames - peakFrame.frame)), `ML Tracking frame ${f}...`);
+        await yieldToUI();
+      }
+      
+      const cropX = currX - cropW / 2;
+      const cropY = currY - cropH / 2;
+      const cropData = cropImageData(frames[f], cropX, cropY, cropW, cropH);
+      cropCtx.putImageData(cropData, 0, 0);
+      
+      const predictions = await mlModel.detect(cropCanvas);
+      const person = predictions.find(p => p.class === 'person');
+      
+      if (person) {
+        currX = cropX + person.bbox[0] + person.bbox[2]/2;
+        currY = cropY + person.bbox[1] + person.bbox[3]/2;
+        mlTrack.push({ frame: f, cx: currX, cy: currY, detected: true });
+        splashY = currY; 
+        landingX = currX;
+        console.log(`[AI] ML Frame ${f}: Person at ${currX.toFixed(1)}, ${currY.toFixed(1)}`);
+      } else {
+        if (mlTrack.length >= 2) {
+          const p1 = mlTrack[mlTrack.length - 2];
+          const p2 = mlTrack[mlTrack.length - 1];
+          currX += (p2.cx - p1.cx);
+          currY += (p2.cy - p1.cy);
+        } else {
+          currY += 5;
+        }
+        mlTrack.push({ frame: f, cx: currX, cy: currY, detected: false });
+        splashY = currY;
+        landingX = currX;
+        console.log(`[AI] ML Frame ${f}: Extrapolated to ${currX.toFixed(1)}, ${currY.toFixed(1)}`);
       }
     }
-  }
-
-  if (initialContactFrame === null) {
-    initialContactFrame = postPeakFrames.length > 0 
-      ? postPeakFrames[Math.floor(postPeakFrames.length * 0.5)].frame 
-      : peakFrame.frame + 5;
+  } else {
+    splashY = Math.floor(height * 0.85);
+    landingX = width / 2;
   }
 
   onProgress(0.8, 'Locating water mound...');
 
-  // Step 6: Find the water "mound" — the precise landing measurement point
-  //
-  // Domain knowledge:
-  // - The mound appears ~0.3-0.7s AFTER initial ski-water contact
-  // - It's at the position where the BACK END of the ski hit the water
-  // - This is the FURTHEST point from the ramp in the splash zone
-  // - We detect it using frame-to-frame brightness change onset
-  //
-  // Strategy: 
-  // 1. For each frame in the search window, compute brightness change from PREVIOUS frame
-  //    (not from background) — this detects the moment the mound APPEARS
-  // 2. Find the first significant brightness spike (onset, not maximum)
-  // 3. X position = the edge of the disturbed water closest to the camera/furthest from ramp
-
-  // Get last known jumper X near contact for search region
-  let lastKnownX = null;
-  const contactIdx = initialContactFrame || 0;
-  for (const t of trackingData.slice(Math.max(0, contactIdx - 10), contactIdx + 1)) {
-    if (t.detected) lastKnownX = t.cx;
-  }
-  if (lastKnownX === null) lastKnownX = peakFrame.cx;
-
-  // HYBRID APPROACH:
-  // Frame: initialContactFrame + 7 (ski contact is ~7 frames after blob tracker's estimate)
-  // X: Detect splash at a LATER frame where it's visible, then use that X position
-  
   let landingFrame = null;
-  let landingX = null;
-  let rampIsRight = null;
+  const safeContactFrame = peakFrame.frame + 10;
   
-  const safeContactFrame = initialContactFrame || Math.floor(totalFrames * 0.4);
-  
-  // Find landing frame: frame of MAXIMUM cy (lowest point in image) after peak = full water contact
-  // Then go back 10 frames = rear ski tip first touching water
-  const LANDING_OFFSET = -10;
-  let fullLandingFrame = null;
-  
-  // Collect detected frames after peak, up to a reasonable window
-  const postPeakDetected = trackingData.filter(t => 
-    t.detected && t.frame > peakFrame.frame && t.frame <= safeContactFrame + 40
-  );
-  
-  let splashX = null;
-  let splashY = null;
-  if (postPeakDetected.length > 0) {
-    // Find frame with maximum cy (lowest point in image = full water contact)
-    const maxCyFrame = postPeakDetected.reduce((best, t) => 
-      t.cy > best.cy ? t : best
-    );
-    fullLandingFrame = maxCyFrame.frame;
-    splashX = maxCyFrame.cx;
-    splashY = maxCyFrame.cy;
-  }
-  
-  // Apply offset: go back 10 frames = rear ski tip contact
-  if (fullLandingFrame !== null) {
-    landingFrame = Math.max(0, fullLandingFrame + LANDING_OFFSET);
-  } else {
-    // Fallback
-    landingFrame = Math.min(safeContactFrame + 7, totalFrames - 1);
-  }
-  
-  console.log('[AI] initialContactFrame:', initialContactFrame, 'peakFrame:', peakFrame.frame);
-  console.log('[AI] Max cy frame (full landing):', fullLandingFrame, '→ measurement frame (offset', LANDING_OFFSET, '):', landingFrame);
-  
-  // STEP 1: LOCATE RAMP using vertical edge detection at horizon zone
-  // The ramp has STRAIGHT EDGES (triangle sides) that create strong vertical edges.
   let rampMarkerX = 0, rampMarkerY = 0;
   let rampNativeX = null, rampNativeY = null, rampNativeTopY = null;
   let rampNativeStartX = null, rampNativeEndX = null;
-  let rampFullWidth = 200; // default: exclude 200px from ramp edge
+  let rampFullWidth = 200;
   
-  // First determine ramp side from splash data
   const splashFrame = Math.min(safeContactFrame + 23, totalFrames - 1);
   const splashGray = toGrayscale(frames[splashFrame]);
   const preSplashGray = toGrayscale(frames[Math.max(0, splashFrame - 4)]);
@@ -250,443 +166,159 @@ export async function analyzeJump(frames, calibPoints = [], onProgress = () => {
   const splashRy1 = Math.floor(height * 0.35);
   const splashRy2 = Math.floor(height * 0.48);
   const colProfile = new Array(width).fill(0);
-  
   for (let y = splashRy1; y < splashRy2; y++) {
     for (let x = 0; x < width; x++) {
       const idx = y * width + x;
-      const vsPreSplash = splashGray[idx] - preSplashGray[idx];
-      const vsBg = splashGray[idx] - bgGray[idx];
-      if (vsPreSplash > 30 && vsBg > 30 && splashGray[idx] > 180) {
+      if (splashGray[idx] - preSplashGray[idx] > 30 && splashGray[idx] - bgGray[idx] > 30 && splashGray[idx] > 180) {
         colProfile[x]++;
       }
     }
   }
   
-  // Find main wake cluster for ramp side detection
-  const clusters = [];
-  let cStart = -1;
-  for (let x = 0; x < width; x++) {
-    if (colProfile[x] > 0) {
-      if (cStart === -1) cStart = x;
-    } else {
-      if (cStart !== -1) {
-        let mass = 0;
-        for (let cx = cStart; cx <= x - 1; cx++) mass += colProfile[cx];
-        clusters.push({ start: cStart, end: x - 1, mass });
-        cStart = -1;
-      }
-    }
-  }
-  if (cStart !== -1) {
-    let mass = 0;
-    for (let cx = cStart; cx < width; cx++) mass += colProfile[cx];
-    clusters.push({ start: cStart, end: width - 1, mass });
+  const windowSize = 20;
+  let maxClusterVal = 0;
+  let maxClusterCol = 0;
+  for (let x = windowSize; x < width - windowSize; x++) {
+    let sum = 0;
+    for (let dx = -windowSize; dx <= windowSize; dx++) sum += colProfile[x+dx];
+    if (sum > maxClusterVal) { maxClusterVal = sum; maxClusterCol = x; }
   }
   
-  if (clusters.length > 0) {
-    const mainWake = clusters.reduce((a, b) => a.mass > b.mass ? a : b);
-    const wakeMid = Math.floor((mainWake.start + mainWake.end) / 2);
-    let leftMass = 0, rightMass = 0;
-    for (let x = mainWake.start; x <= mainWake.end; x++) {
-      if (x < wakeMid) leftMass += colProfile[x];
-      else rightMass += colProfile[x];
-    }
-    rampIsRight = rightMass < leftMass;
-    console.log('[AI] Ramp side: left wake:', leftMass, 'right wake:', rightMass,
-      '→', rampIsRight ? 'RIGHT' : 'LEFT');
-  }
+  let leftSum = 0, rightSum = 0;
+  for (let x = 0; x < maxClusterCol - 50; x++) leftSum += colProfile[x];
+  for (let x = maxClusterCol + 50; x < width; x++) rightSum += colProfile[x];
   
-  // Find ramp position using vertical edge detection
-  if (rampIsRight !== null) {
-    const searchX1 = rampIsRight ? Math.floor(width * 0.55) : 0;
-    const searchX2 = rampIsRight ? width : Math.floor(width * 0.45);
-    const horizonY1 = Math.floor(height * 0.15);
-    const horizonY2 = Math.floor(height * 0.45);
-    
-    const edgeStrength = new Array(width).fill(0);
-    for (let x = searchX1 + 2; x < searchX2 - 2; x++) {
-      let totalEdge = 0;
-      for (let y = horizonY1; y < horizonY2; y++) {
-        const left = bgGray[y * width + (x - 2)];
-        const right = bgGray[y * width + (x + 2)];
-        totalEdge += Math.abs(right - left);
+  let rampIsRight = rightSum < leftSum;
+  console.log('[AI] Ramp side:', rampIsRight ? 'RIGHT' : 'LEFT');
+
+  let rampXStart = rampIsRight ? width - 400 : 0;
+  let rampXEnd = rampIsRight ? width : 400;
+  let rampZoneY1 = Math.floor(height * 0.2);
+  let rampZoneY2 = Math.floor(height * 0.35);
+
+  let clusterStarts = [];
+  let currentStart = null;
+  for(let x = rampXStart; x < rampXEnd; x++) {
+      let isStructure = false;
+      let varSum = 0;
+      for(let y = rampZoneY1; y < rampZoneY2; y+=4) {
+          varSum += Math.abs(bgGray[y*width + x] - bgGray[(y-4)*width + x]);
       }
-      edgeStrength[x] = totalEdge;
-    }
-    
-    const smoothEdge = new Array(width).fill(0);
-    for (let x = searchX1 + 5; x < searchX2 - 5; x++) {
-      let sum = 0;
-      for (let dx = -3; dx <= 3; dx++) sum += edgeStrength[x + dx];
-      smoothEdge[x] = sum / 7;
-    }
-    
-    let maxEdge = 0;
-    for (let x = searchX1; x < searchX2; x++) {
-      if (smoothEdge[x] > maxEdge) maxEdge = smoothEdge[x];
-    }
-    
-    const edgeThreshold = maxEdge * 0.3;
-    const edgeClusters = [];
-    cStart = -1;
-    for (let x = searchX1; x < searchX2; x++) {
-      if (smoothEdge[x] > edgeThreshold) {
-        if (cStart === -1) cStart = x;
+      if(varSum > 60) isStructure = true;
+      if(isStructure && currentStart === null) currentStart = x;
+      if(!isStructure && currentStart !== null) {
+          clusterStarts.push({start: currentStart, end: x-1, width: x-currentStart});
+          currentStart = null;
+      }
+  }
+
+  const validClusters = clusterStarts.filter(c => c.width >= 10 && c.width <= 150);
+  if (validClusters.length > 0) {
+      let targetCluster;
+      if (rampIsRight) {
+          targetCluster = validClusters.reduce((a, b) => b.end > a.end ? b : a);
       } else {
-        if (cStart !== -1) {
-          const w = x - cStart;
-          if (w >= 10 && w <= 300) {
-            edgeClusters.push({ start: cStart, end: x - 1, width: w, cx: Math.round((cStart + x - 1) / 2) });
-          }
-          cStart = -1;
-        }
+          targetCluster = validClusters.reduce((a, b) => a.start < b.start ? a : b);
       }
-    }
-    
-    console.log('[AI] Ramp edge clusters:', edgeClusters.map(c => 
-      `[${c.start}-${c.end}](w=${c.width},cx=${c.cx})`).join(' '));
-    
-    if (edgeClusters.length > 0) {
-      const rampCluster = rampIsRight 
-        ? edgeClusters.reduce((a, b) => a.cx > b.cx ? a : b)
-        : edgeClusters.reduce((a, b) => a.cx < b.cx ? a : b);
-      
-      // Find ramp top Y and base Y
-      let rampTopY = horizonY2;
-      for (let y = horizonY1; y < horizonY2; y++) {
-        let rowEdge = 0;
-        for (let x = rampCluster.start; x <= rampCluster.end; x++) {
-          const left = bgGray[y * width + (x - 2)];
-          const right = bgGray[y * width + (x + 2)];
-          rowEdge += Math.abs(right - left);
-        }
-        if (rowEdge > maxEdge * 0.1) {
-          rampTopY = y;
-          break;
-        }
-      }
-      let rampBaseY = horizonY2;
-      for (let y = horizonY2; y > horizonY1; y--) {
-        let rowEdge = 0;
-        for (let x = rampCluster.start; x <= rampCluster.end; x++) {
-          const left = bgGray[y * width + (x - 2)];
-          const right = bgGray[y * width + (x + 2)];
-          rowEdge += Math.abs(right - left);
-        }
-        if (rowEdge > maxEdge * 0.1) {
-          rampBaseY = y;
-          break;
-        }
-      }
-      
-      rampNativeX = rampCluster.cx;
-      rampNativeY = rampBaseY;
-      rampMarkerX = rampCluster.cx / width;
-      rampMarkerY = rampTopY / height;
-      
-      // Save ramp dimensions for skier search
-      rampNativeTopY = rampTopY;
-      rampNativeStartX = rampCluster.start;
-      rampNativeEndX = rampCluster.end;
-      
-      // Full ramp extent: from outermost cluster to innermost
-      // This gives us the total ramp width for exclusion zone
-      const outerEdge = rampIsRight
-        ? edgeClusters.reduce((a, b) => a.start < b.start ? a : b).start  // leftmost = outer edge for right ramp
-        : edgeClusters.reduce((a, b) => a.end > b.end ? a : b).end;       // rightmost = outer edge for left ramp
-      rampFullWidth = Math.abs(rampCluster.cx - outerEdge);
-      
-      console.log('[AI] Ramp located: x=', rampCluster.cx, 
-        'topY=', rampTopY, 'baseY=', rampBaseY, 'height=', rampBaseY - rampTopY,
-        'cluster:', rampCluster.start, '-', rampCluster.end,
-        'fullWidth:', rampFullWidth);
-    }
-  }
-  
-  // STEP 2: FULL-WIDTH SILHOUETTE SCAN (RAW GRAYSCALE)
-  // No motion tracking or trajectory prediction used.
-  // We scan across the waterline at the identified landing frame,
-  // looking for a dark, high-aspect-ratio (vertical) silhouette.
-  // Search boundaries are restricted by user calibration points if available,
-  // and we exclude the ramp area to avoid false positives.
-
-  let blobBox = null;
-  let predBlobBox = null;
-  const allDetections = new Array(totalFrames).fill(null);
-
-  // --- Waterline estimate ---
-  // 1. BEST: If user provided calibration points, they are clicked exactly on the waterline. Use their average Y!
-  // 2. GOOD: Ramp base (if detected)
-  // 3. FALLBACK: Max cy of tracked flight blobs.
-  let estimatedWaterlineY = null;
-  if (calibPoints && calibPoints.length > 0) {
-    const calibYs = calibPoints.filter(p => typeof p.pixelY !== 'undefined').map(p => p.pixelY);
-    if (calibYs.length > 0) {
-      estimatedWaterlineY = Math.round(calibYs.reduce((a, b) => a + b) / calibYs.length);
-      console.log('[AI] Estimated waterline Y from CALIBRATION POINTS:', estimatedWaterlineY);
-    }
-  }
-  
-  if (estimatedWaterlineY === null) {
-    // Rely completely on the physical splash tracker's lowest point (splashY) if available,
-    // otherwise fallback to the lowest point of any tracked flight blob,
-    // otherwise fallback to the ramp base (if detected, though unreliable),
-    // otherwise fallback to 25% of screen height.
-    const skierCys = trackingData.filter(t => t.detected && t.frame <= safeContactFrame).map(t => t.cy);
-    estimatedWaterlineY = splashY || 
-      (skierCys.length > 0 ? Math.max(...skierCys) : (rampNativeY || Math.floor(height * 0.25)));
-    console.log('[AI] Estimated waterline Y from heuristics (splashY fallback):', estimatedWaterlineY);
+      rampNativeX = rampIsRight ? targetCluster.end : targetCluster.start;
+      rampNativeStartX = targetCluster.start;
+      rampNativeEndX = targetCluster.end;
+      rampNativeTopY = rampZoneY1;
+      rampNativeY = rampZoneY2;
+      rampMarkerX = rampNativeX;
+      rampMarkerY = rampNativeY;
+      rampFullWidth = targetCluster.width * 2.5;
   }
 
-  // --- Define X Search Bounds ---
+  if (splashY === null) splashY = Math.floor(height * 0.85);
+
   let searchStartX = 0;
-  let searchEndX = width - 1;
-
-  if (calibPoints && calibPoints.length >= 2) {
-    // If calibration points exist, use them as strict boundaries
-    // Note: calib points now store normX (0..1)
-    const calibXs = calibPoints.filter(p => typeof p.normX !== 'undefined').map(p => p.normX * width);
-    if (calibXs.length >= 2) {
-      searchStartX = Math.max(0, Math.floor(Math.min(...calibXs)));
-      searchEndX = Math.min(width - 1, Math.ceil(Math.max(...calibXs)));
-      console.log(`[AI] Bounding search to calibration zone: ${searchStartX} - ${searchEndX}`);
-    }
+  let searchEndX = width;
+  if (rampNativeStartX !== null && rampNativeEndX !== null) {
+      if (rampIsRight) searchEndX = Math.max(0, rampNativeStartX - rampFullWidth);
+      else searchStartX = Math.min(width, rampNativeEndX + rampFullWidth);
   }
 
-  // --- Peak-based constraints removed per user request ---
-  // We rely entirely on finding visual candidates and sorting by distance to ramp.
-
-
-  // --- Exclude Ramp Region ---
-  // If we found the ramp, avoid searching inside it
-  if (typeof rampNativeStartX !== 'undefined' && typeof rampNativeEndX !== 'undefined') {
-    if (rampIsRight) {
-      // Ramp is on the right, skier lands to the left of it
-      searchEndX = Math.min(searchEndX, rampNativeStartX - 50); // 50px safety margin
-    } else {
-      // Ramp is on the left, skier lands to the right of it
-      searchStartX = Math.max(searchStartX, rampNativeEndX + 50);
-    }
-    console.log(`[AI] Adjusted for ramp exclusion: ${searchStartX} - ${searchEndX}`);
-  }
-
-  // --- Broad X Search ---
-  // We explicitly do NOT narrow the X search zone based on splashX.
-  // The skier moves horizontally very fast. If we restrict X, we might miss the initial
-  // splash because it happens outside the box, causing the landing to be detected "too late".
-  // Because our Y-band (below) is tightly restricted to the physical bottom of the splash,
-  // we safely ignore the boat wake without needing an X-restriction.
-
-  // --- Scan Backwards from Splash Peak (User's Method) ---
-  // The user identified that the physical transition from "no splash" to "explosive splash"
-  // is much more robust than guessing if a dark blob is a skier or a buoy.
-  // We scan backwards frame-by-frame from the splash peak. In each frame, we count the number of NEW bright splash pixels.
-  // The landing frame is exactly where the splash count drops to near zero.
+  let splashScores = new Array(totalFrames).fill(0);
+  let splashScanY1 = Math.max(0, Math.floor(splashY) - 20);
+  let splashScanY2 = Math.min(height, Math.floor(splashY) + 20);
   
-  const scanStartFrame = fullLandingFrame !== null ? fullLandingFrame : Math.min(safeContactFrame + 15, totalFrames - 1);
-  const scanEndFrame = Math.max(0, scanStartFrame - 80);
+  let splashStartFrame = null;
+  let baselineScore = 0;
+  let peakScore = 0;
   
-  // We use the EXACT physical Y-coordinate where the massive splash was observed (splashY).
-  // IMPORTANT: The boat wake is slightly ABOVE the skier's landing (further away).
-  // To avoid the boat wake interfering with our splash count, we look only at the 
-  // LOWER half of the splash (closer to the camera).
-  const splashYTop = splashY !== null ? Math.min(height - 1, splashY) : Math.floor(height * 0.4);
-  const splashYBot = splashY !== null ? Math.min(height - 1, splashY + 30) : Math.floor(height * 0.6);
-  
-  let splashCounts = [];
-  
-  for (let f = scanStartFrame; f >= scanEndFrame; f--) {
-    const fGray = toGrayscale(frames[f]);
-    let splashCount = 0;
-    let sumX = 0;
-    
-    for (let y = splashYTop; y <= splashYBot; y++) {
-      for (let x = searchStartX; x <= searchEndX; x++) {
-        const idx = y * width + x;
-        // A splash pixel is bright, and significantly brighter than the median background
-        if (fGray[idx] > 160 && (fGray[idx] - bgGray[idx]) > 30) {
-          splashCount++;
-          sumX += x;
-        }
+  const peakGrayForBaseline = toGrayscale(frames[peakFrame.frame]);
+  for(let x=searchStartX; x<searchEndX; x++) {
+      let score = 0;
+      for(let y=splashScanY1; y<splashScanY2; y++) {
+          let val = peakGrayForBaseline[y*width+x];
+          if (val > 180) score += (val - 180);
       }
-    }
-    
-    splashCounts.push({ 
-      frame: f, 
-      count: splashCount, 
-      avgX: splashCount > 0 ? sumX / splashCount : null 
-    });
+      baselineScore += score;
   }
   
-  let bestLandingFrame = null;
-  let bestLandingX = null;
-  let bestBlobBox = null;
-  
-  // We have the splash counts going backwards in time.
-  // Find the maximum splash in our window.
-  let maxSplash = 0;
-  for (let s of splashCounts) {
-    if (s.count > maxSplash) maxSplash = s.count;
+  for (let f = totalFrames - 1; f >= peakFrame.frame; f--) {
+      const g = toGrayscale(frames[f]);
+      let frameScore = 0;
+      for(let x=searchStartX; x<searchEndX; x++) {
+          let score = 0;
+          for(let y=splashScanY1; y<splashScanY2; y++) {
+              let val = g[y*width+x];
+              if (val > 180) score += (val - 180);
+          }
+          frameScore += score;
+      }
+      splashScores[f] = frameScore;
+      if (frameScore > peakScore) peakScore = frameScore;
   }
   
-  // Calculate a baseline noise level from the EARLIEST 15 frames in the scan (which should be before the jump)
-  let noiseSum = 0;
-  let noiseCount = 0;
-  for (let i = splashCounts.length - 1; i >= Math.max(0, splashCounts.length - 15); i--) {
-     noiseSum += splashCounts[i].count;
-     noiseCount++;
-  }
-  const baselineNoise = noiseCount > 0 ? noiseSum / noiseCount : 0;
+  const threshold = baselineScore + (peakScore - baselineScore) * 0.15;
+  console.log(`[AI] Splash scan Y: ${splashScanY1}-${splashScanY2}. Baseline: ${baselineScore}, Peak: ${peakScore}`);
   
-  // Dynamic threshold: We want to wait until the splash is TRULY dead.
-  // 15% of a massive peak splash is still a very visible splash!
-  // We should just use baseline noise + a small absolute pixel buffer (e.g., 20 pixels)
-  // or a tiny percentage (2%) just to avoid micro-fluctuations.
-  const threshold = baselineNoise + Math.max(20, (maxSplash - baselineNoise) * 0.02);
-  
-  console.log(`[AI] Splash threshold dynamically set to ${Math.round(threshold)} (max=${maxSplash}, baseline=${Math.round(baselineNoise)})`);
-  
-  // Find the first frame (going backwards) where the splash count drops below the dynamic threshold.
-  // The frame RIGHT BEFORE that (chronologically after) is the exact landing frame!
-  for (let i = 0; i < splashCounts.length; i++) {
-    if (splashCounts[i].count <= threshold) {
-       const landingData = i > 0 ? splashCounts[i - 1] : splashCounts[i];
-       bestLandingFrame = landingData.frame;
-       bestLandingX = landingData.avgX !== null ? landingData.avgX : splashX;
-       break;
-    }
-  }
-  
-  if (bestLandingFrame === null && splashCounts.length > 0) {
-     // Fallback if it never dropped below 10 (e.g. constant white noise)
-     bestLandingFrame = splashCounts[splashCounts.length - 1].frame;
-     bestLandingX = splashCounts[splashCounts.length - 1].avgX || splashX;
-  }
-  
-  // We found the landing frame based on splash disappearance.
-  // Now, to satisfy the user's request, we step back exactly to this frame and 
-  // find the actual SKIER (dark blob) at this location to draw a perfect bounding box around them!
-  if (bestLandingX !== null && bestLandingFrame !== null) {
-     const fGray = toGrayscale(frames[bestLandingFrame]);
-     const darkMask = new Uint8Array(width * height);
-     for (let i = 0; i < width * height; i++) {
-       // Skier is dark and moving
-       darkMask[i] = (fGray[i] < 120 && Math.abs(fGray[i] - bgGray[i]) > 20) ? 255 : 0;
-     }
-     
-     const vis = new Uint8Array(width * height);
-     let bestSkierComp = null;
-     
-     // Search in a box around the splash landing zone
-     const sStartX = Math.max(0, Math.floor(bestLandingX - 50));
-     const sEndX = Math.min(width - 1, Math.floor(bestLandingX + 50));
-     const sStartY = Math.max(0, splashY - 40);
-     const sEndY = Math.min(height - 1, splashY + 20);
-     
-     for (let y = sStartY; y < sEndY; y++) {
-       for (let x = sStartX; x <= sEndX; x++) {
-         const idx = y * width + x;
-         if (vis[idx] || darkMask[idx] === 0) continue;
-         
-         const comp = floodFill(darkMask, vis, width, height, x, y, 128, sStartY, sEndY, sStartX, sEndX);
-         
-         // A skier is typically taller than they are wide (vertical shape).
-         // We require height to be at least 1.1x the width to filter out flat horizontal shadows.
-         if (comp.area >= 15 && comp.h >= comp.w * 1.1) {
-           if (!bestSkierComp || comp.area > bestSkierComp.area) {
-             bestSkierComp = comp;
-           }
-         }
-       }
-     }
-     
-     if (bestSkierComp) {
-       bestBlobBox = {
-         x: bestSkierComp.minX / width,
-         y: bestSkierComp.minY / height,
-         w: bestSkierComp.w / width,
-         h: bestSkierComp.h / height
-       };
-       // Refine landingX to the edge of the actual skier body
-       bestLandingX = rampIsRight ? bestSkierComp.maxX : bestSkierComp.minX;
-     } else {
-       // Fallback bounding box if floodfill fails
-       bestBlobBox = {
-         x: (bestLandingX - 10) / width,
-         y: (splashY - 30) / height,
-         w: 20 / width,
-         h: 40 / height
-       };
-     }
+  for (let f = totalFrames - 1; f >= peakFrame.frame; f--) {
+      if (splashScores[f] < threshold && splashScores[Math.min(totalFrames-1, f+1)] >= threshold) {
+          splashStartFrame = f;
+          break;
+      }
   }
 
-  // --- Determine final landing position ---
-  if (bestLandingFrame !== null) {
-    landingFrame = bestLandingFrame;
-    landingX = bestLandingX;
-    blobBox = bestBlobBox;
-    allDetections[landingFrame] = { score: 100, box: blobBox }; // arbitrary high score since it's exact
-    console.log(`[AI] Splash transition found! Landing exactly at frame ${landingFrame}, x=${Math.round(landingX)}`);
+  if (splashStartFrame !== null) {
+      landingFrame = splashStartFrame;
+      console.log(`[AI] Landing exactly at frame ${landingFrame}`);
   } else {
-    // Pure fallback if nothing was found
-    landingX = (searchStartX + searchEndX) / 2;
-    console.log(`[AI] No splash transition found — fallback x: ${Math.round(landingX)}`);
-  }
-  
-  console.log('[AI] Final: frame', landingFrame, 'x:', Math.round(landingX));
-  
-  // Normalize landing X to 0..1
-  const landingXNorm = landingX !== null ? landingX / width : null;
-
-  // Calculate confidence based on multiple signals
-  let confidence = 0;
-  if (yRange > 20) confidence += 0.3;
-  if (detectedFrames.length > 10) confidence += 0.2;
-  if (initialContactFrame !== null) confidence += 0.2;
-  if (bestLandingFrame !== null) confidence += 0.3;
-  else if (landingFrame !== null) confidence += 0.1;
-
-  confidence = Math.min(1, confidence);
-
-  onProgress(0.9, 'Building result...');
-
-  // Build phase timeline
-  const phases = [];
-  if (significantFrames.length > 0) {
-    const firstMotion = significantFrames[0].frame;
-    if (firstMotion < peakFrame.frame) {
-      phases.push({ start: firstMotion, end: peakFrame.frame, type: 'APPROACH_AND_FLIGHT' });
-    }
-    phases.push({ start: peakFrame.frame, end: initialContactFrame, type: 'DESCENT' });
-    if (landingFrame !== null) {
-      phases.push({ start: initialContactFrame, end: Math.min(landingFrame + 15, totalFrames - 1), type: 'LANDING' });
-    }
+      landingFrame = peakFrame.frame + 60;
+      console.log('[AI] Splash transition not found, using fallback.');
   }
 
-  const trajectory = trackingData
-    .filter(t => t.detected)
-    .map(t => ({ frame: t.frame, x: t.cx / width, y: t.cy / height }));
+  const boxSize = 30;
+  const bestBlobBox = { x: landingX - boxSize/2, y: splashY - boxSize/2, width: boxSize, height: boxSize };
+  onProgress(1.0, 'Analysis complete');
 
-  onProgress(1, 'Analysis complete!');
-
+  const finalTrajectory = [];
+  for (let t of trackingData) {
+      if (t.frame < peakFrame.frame && t.detected) finalTrajectory.push({frame: t.frame, x: t.cx / width, y: t.cy / height});
+  }
+  for (let t of mlTrack) {
+      finalTrajectory.push({frame: t.frame, x: t.cx / width, y: t.cy / height});
+  }
 
   return {
     landingFrameIndex: landingFrame,
-    landingX: landingXNorm,
-    confidence,
-    phases,
-    trajectory,
-    peakFrame: peakFrame.frame,
-    initialContact: initialContactFrame,
-    rampMarker: rampIsRight !== null ? { x: rampMarkerX, y: rampMarkerY } : null,
-    blobBox,
-    predBlobBox,
-    frameWidth: width,
-    allDetections,
-    waterlineY: estimatedWaterlineY / height,  // normalized 0..1
+    landingX: landingX / width,
+    confidence: mlModel ? 0.9 : 0.4,
+    phases: [
+      { start: 0, end: peakFrame.frame, type: 'FLIGHT_ASCENT' },
+      { start: peakFrame.frame, end: landingFrame, type: 'FLIGHT_DESCENT' },
+      { start: landingFrame, end: totalFrames - 1, type: 'RIDE_AWAY' }
+    ],
+    trajectory: finalTrajectory,
+    rampMarker: { x: rampMarkerX, y: rampMarkerY },
+    rampNative: { x: rampNativeX, y: rampNativeY, topY: rampNativeTopY, startX: rampNativeStartX, endX: rampNativeEndX },
+    predBlobBox: bestBlobBox,
+    flightBox: bestBlobBox,
+    waterlineY: splashY / height
   };
 }
-
 
 // --- Helper functions ---
 
@@ -887,4 +519,31 @@ function fitLinear1D(xs, ys) {
  */
 function yieldToUI() {
   return new Promise(resolve => setTimeout(resolve, 0));
+}
+
+/**
+ * Extract a cropped rectangular region from an ImageData object.
+ */
+function cropImageData(srcImageData, x, y, width, height) {
+  const crop = new ImageData(width, height);
+  const src = srcImageData.data;
+  const dst = crop.data;
+  const srcW = srcImageData.width;
+  const srcH = srcImageData.height;
+  
+  for (let cy = 0; cy < height; cy++) {
+    for (let cx = 0; cx < width; cx++) {
+      const srcX = Math.max(0, Math.min(srcW - 1, Math.floor(x) + cx));
+      const srcY = Math.max(0, Math.min(srcH - 1, Math.floor(y) + cy));
+      
+      const srcIdx = (srcY * srcW + srcX) * 4;
+      const dstIdx = (cy * width + cx) * 4;
+      
+      dst[dstIdx] = src[srcIdx];
+      dst[dstIdx+1] = src[srcIdx+1];
+      dst[dstIdx+2] = src[srcIdx+2];
+      dst[dstIdx+3] = src[srcIdx+3];
+    }
+  }
+  return crop;
 }
