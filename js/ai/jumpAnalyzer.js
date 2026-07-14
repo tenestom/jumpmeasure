@@ -748,72 +748,50 @@ function floodFill(diff, visited, width, height, startX, startY, threshold, roiT
  */
 function findWaterline(bgGray, width, height) {
   const scanTop    = Math.floor(height * 0.05);
-  const scanBottom = Math.floor(height * 0.65);
-  const edgeThreshold = 8;
-  const checkRows = 30; // rows below candidate to measure uniformity
+  const scanBottom = Math.floor(height * 0.70);
+  const checkRows  = 25; // rows to sample above and below
+  const sampleStep = 4;  // sample every 4th pixel for speed
   
-  // Step 1: per-row edge coverage (how many columns have a significant edge)
-  const rowScore = new Float32Array(height).fill(0);
-  for (let y = scanTop; y < scanBottom; y++) {
-    let count = 0;
-    for (let x = 0; x < width; x++) {
-      if (Math.abs(bgGray[y * width + x] - bgGray[(y + 1) * width + x]) > edgeThreshold) {
-        count++;
-      }
-    }
-    rowScore[y] = count;
-  }
+  // For each candidate row: score = variance_above - variance_below
+  // Shoreline: trees above (high var) + water below (low var) → high score
+  // Wake:      water above (low var) + water below (low var) → near zero
+  // Sky/tree:  sky above (low var)  + trees below (high var) → negative
   
-  // Step 2: smooth ±6 rows to measure vertical thickness
-  const smoothed = new Float32Array(height).fill(0);
-  const radius = 6;
-  for (let y = scanTop; y < scanBottom; y++) {
-    let sum = 0, cnt = 0;
-    for (let dy = -radius; dy <= radius; dy++) {
-      const yy = y + dy;
-      if (yy >= scanTop && yy < scanBottom) { sum += rowScore[yy]; cnt++; }
-    }
-    smoothed[y] = sum / cnt;
-  }
-  
-  // Step 3: global max → threshold for "real" edge zones
-  let globalMax = 0;
-  for (let y = scanTop; y < scanBottom; y++) {
-    if (smoothed[y] > globalMax) globalMax = smoothed[y];
-  }
-  const minEdgeThreshold = globalMax * 0.35;
-  
-  // Step 4: among all thick edge zones, pick the one with MOST UNIFORM region below.
-  // Below sky/tree boundary → trees (high variance).
-  // Below tree/water boundary → water (low variance) ← this is what we want.
   let bestY = Math.floor(height * 0.22);
-  let lowestVariance = Infinity;
+  let bestScore = -Infinity;
   
-  for (let y = scanTop; y < scanBottom - checkRows; y++) {
-    if (smoothed[y] < minEdgeThreshold) continue; // not a thick edge, skip
+  for (let y = scanTop + checkRows; y < scanBottom - checkRows; y++) {
+    let sumA = 0, sumSqA = 0, cntA = 0;
+    let sumB = 0, sumSqB = 0, cntB = 0;
     
-    // Measure variance of rows below this candidate
-    let sum = 0, sumSq = 0, cnt = 0;
-    const sampleStep = 4; // sample every 4th pixel for speed
-    for (let dy = 5; dy < checkRows; dy++) {
-      const yy = y + dy;
-      if (yy >= height) break;
+    // Sample rows ABOVE
+    for (let dy = 1; dy <= checkRows; dy++) {
+      const yy = y - dy;
       for (let x = 0; x < width; x += sampleStep) {
         const v = bgGray[yy * width + x];
-        sum += v; sumSq += v * v; cnt++;
+        sumA += v; sumSqA += v * v; cntA++;
       }
     }
-    if (cnt === 0) continue;
-    const mean = sum / cnt;
-    const variance = (sumSq / cnt) - (mean * mean);
+    // Sample rows BELOW
+    for (let dy = 1; dy <= checkRows; dy++) {
+      const yy = y + dy;
+      for (let x = 0; x < width; x += sampleStep) {
+        const v = bgGray[yy * width + x];
+        sumB += v; sumSqB += v * v; cntB++;
+      }
+    }
     
-    if (variance < lowestVariance) {
-      lowestVariance = variance;
+    const varA = cntA > 0 ? (sumSqA / cntA) - (sumA / cntA) ** 2 : 0;
+    const varB = cntB > 0 ? (sumSqB / cntB) - (sumB / cntB) ** 2 : 0;
+    const score = varA - varB; // high = trees above, water below = shoreline
+    
+    if (score > bestScore) {
+      bestScore = score;
       bestY = y;
     }
   }
   
-  console.log('[AI] Waterline (uniform below): Y=', bestY, 'variance below=', lowestVariance.toFixed(1));
+  console.log('[AI] Waterline (var_above - var_below): Y=', bestY, 'score=', bestScore.toFixed(1));
   return bestY;
 }
 
