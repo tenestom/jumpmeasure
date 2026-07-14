@@ -89,7 +89,30 @@ export async function analyzeJump(frames, calibPoints = [], onProgress = () => {
     };
   }
 
-  const peakFrame = significantFrames.reduce((best, t) => t.cy < best.cy ? t : best, significantFrames[0]);
+  const cropCanvas = new OffscreenCanvas(300, 300);
+  const cropCtx = cropCanvas.getContext('2d', { willReadFrequently: true });
+  
+  let peakFrame = significantFrames[0];
+  if (mlModel) {
+    onProgress(0.4, 'Verifying peak candidate with ML...');
+    const candidatePeaks = [...significantFrames].sort((a, b) => a.cy - b.cy);
+    for (const candidate of candidatePeaks) {
+      const cropData = cropImageData(frames[candidate.frame], candidate.cx, candidate.cy, 300, 300);
+      cropCtx.putImageData(cropData, 0, 0);
+      const predictions = await mlModel.detect(cropCanvas, 10, 0.15);
+      const person = predictions.find(p => p.class === 'person' || p.class === 'skis' || p.class === 'surfboard');
+      
+      if (person) {
+         peakFrame = candidate;
+         console.log(\[AI] ML Confirmed true peak at frame \ (Y=\)\);
+         break;
+      } else {
+         console.log(\[AI] Rejected candidate peak at frame \ (No person found)\);
+      }
+    }
+  } else {
+    peakFrame = significantFrames.reduce((best, t) => t.cy < best.cy ? t : best, significantFrames[0]);
+  }
   console.log('[AI] peakFrame:', peakFrame.frame);
 
   let splashY = null;
