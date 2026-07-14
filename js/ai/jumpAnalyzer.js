@@ -413,11 +413,24 @@ export async function analyzeJump(frames, calibPoints = [], onProgress = () => {
   const allDetections = new Array(totalFrames).fill(null);
 
   // --- Waterline estimate ---
-  // Ramp base is the best reference; else use max cy of tracked flight blobs.
-  const skierCys = trackingData.filter(t => t.detected && t.frame <= safeContactFrame).map(t => t.cy);
-  const estimatedWaterlineY = rampNativeY ||
-    (skierCys.length > 0 ? Math.max(...skierCys) : Math.floor(height * 0.25));
-  console.log('[AI] Estimated waterline Y:', estimatedWaterlineY);
+  // 1. BEST: If user provided calibration points, they are clicked exactly on the waterline. Use their average Y!
+  // 2. GOOD: Ramp base (if detected)
+  // 3. FALLBACK: Max cy of tracked flight blobs.
+  let estimatedWaterlineY = null;
+  if (calibPoints && calibPoints.length > 0) {
+    const calibYs = calibPoints.filter(p => typeof p.pixelY !== 'undefined').map(p => p.pixelY);
+    if (calibYs.length > 0) {
+      estimatedWaterlineY = Math.round(calibYs.reduce((a, b) => a + b) / calibYs.length);
+      console.log('[AI] Estimated waterline Y from CALIBRATION POINTS:', estimatedWaterlineY);
+    }
+  }
+  
+  if (estimatedWaterlineY === null) {
+    const skierCys = trackingData.filter(t => t.detected && t.frame <= safeContactFrame).map(t => t.cy);
+    estimatedWaterlineY = rampNativeY ||
+      (skierCys.length > 0 ? Math.max(...skierCys) : Math.floor(height * 0.25));
+    console.log('[AI] Estimated waterline Y from heuristics:', estimatedWaterlineY);
+  }
 
   // --- Define X Search Bounds ---
   let searchStartX = 0;
