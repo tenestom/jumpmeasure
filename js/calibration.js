@@ -27,7 +27,7 @@ export function handleInteraction(clientX, clientY) {
     const handleOk = () => {
       let m = calibInput.value;
       if (m !== '' && !isNaN(parseFloat(m))) {
-        state.calibPoints.push({ pixelX: cx, pixelY: cy, meters: parseFloat(m) });
+        state.calibPoints.push({ pixelX: cx, pixelY: cy, normX: cx / pt.vw, meters: parseFloat(m) });
         state.calibPoints.sort((a, b) => a.pixelX - b.pixelX);
       }
       cleanup();

@@ -423,10 +423,13 @@ export async function analyzeJump(frames, calibPoints = [], onProgress = () => {
 
   if (calibPoints && calibPoints.length >= 2) {
     // If calibration points exist, use them as strict boundaries
-    const calibXs = calibPoints.map(p => p.pixelX);
-    searchStartX = Math.max(0, Math.floor(Math.min(...calibXs)));
-    searchEndX = Math.min(width - 1, Math.ceil(Math.max(...calibXs)));
-    console.log(`[AI] Bounding search to calibration zone: ${searchStartX} - ${searchEndX}`);
+    // Note: calib points now store normX (0..1)
+    const calibXs = calibPoints.filter(p => typeof p.normX !== 'undefined').map(p => p.normX * width);
+    if (calibXs.length >= 2) {
+      searchStartX = Math.max(0, Math.floor(Math.min(...calibXs)));
+      searchEndX = Math.min(width - 1, Math.ceil(Math.max(...calibXs)));
+      console.log(`[AI] Bounding search to calibration zone: ${searchStartX} - ${searchEndX}`);
+    }
   }
 
   // --- Exclude Ramp Region ---
