@@ -449,91 +449,96 @@ export async function analyzeJump(frames, calibPoints = [], onProgress = () => {
     console.log(`[AI] Adjusted for ramp exclusion: ${searchStartX} - ${searchEndX}`);
   }
 
-  // --- Scan the Landing Frame ---
-  // We look in a vertical window around the waterline.
+  // --- Scan Backwards from Splash to Peak ---
+  // The user identified that looking at a single frame (-10 offset) is fragile.
+  // Instead, we know the biggest splash is at fullLandingFrame.
+  // We scan backwards frame-by-frame from the splash towards the peak.
+  // We score all valid skier silhouettes.
+  // The frame with the highest silhouette score will naturally be the moment
+  // the skier is most clearly visible at the waterline, right before the splash obscures them.
+
   const yTop = Math.max(0, estimatedWaterlineY - Math.floor(height * 0.22));
   const yBot = Math.min(height - 1, estimatedWaterlineY + 20);
   
-  let candidates = [];
+  const scanStartFrame = fullLandingFrame !== null ? fullLandingFrame : Math.min(safeContactFrame + 15, totalFrames - 1);
+  const scanEndFrame = peakFrame.frame;
   
-  // Use the previously identified measurement frame (or fallback)
-  const scanFrame = landingFrame;
-  const fGray = toGrayscale(frames[scanFrame]);
-  const darkMask = new Uint8Array(width * height);
+  let bestGlobalScore = 0;
+  let bestLandingX = null;
+  let bestLandingFrame = null;
+  let bestBlobBox = null;
   
   // Parameters for silhouette shape
   const DARK_THRESH = 110;   // Skier is dark
   const MIN_BLOB_AREA = 30;  // Must be somewhat visible
   
-  // Create a mask where dark pixels get a high value (like a diff map) so we can reuse floodFill
-  for (let i = 0; i < width * height; i++) {
-    darkMask[i] = fGray[i] < DARK_THRESH ? 255 : 0;
+  // Determine the X-coordinate of the ramp
+  let rampX = rampIsRight ? width : 0;
+  if (typeof rampNativeStartX !== 'undefined' && typeof rampNativeEndX !== 'undefined') {
+    rampX = rampIsRight ? rampNativeStartX : rampNativeEndX;
   }
-  
-  const vis = new Uint8Array(width * height);
-  
-  for (let y = yTop; y < yBot; y++) {
-    for (let x = searchStartX; x <= searchEndX; x++) {
-      const idx = y * width + x;
-      if (vis[idx] || darkMask[idx] === 0) continue;
-      
-      // Found a dark pixel, flood-fill it
-      const comp = floodFill(darkMask, vis, width, height, x, y, 128, yTop, yBot, searchStartX, searchEndX);
-      
-      if (comp.area >= MIN_BLOB_AREA) {
-        // We want a high aspect ratio (taller than it is wide)
-        const compAspect = comp.h / Math.max(1, comp.w);
-        // We want it to be anchored near the waterline
-        const distToWaterline = Math.abs(comp.maxY - estimatedWaterlineY);
+
+  for (let f = scanStartFrame; f >= scanEndFrame; f--) {
+    let candidates = [];
+    const fGray = toGrayscale(frames[f]);
+    const darkMask = new Uint8Array(width * height);
+    
+    // Create a mask where dark pixels get a high value (like a diff map) so we can reuse floodFill
+    for (let i = 0; i < width * height; i++) {
+      darkMask[i] = fGray[i] < DARK_THRESH ? 255 : 0;
+    }
+    
+    const vis = new Uint8Array(width * height);
+    
+    for (let y = yTop; y < yBot; y++) {
+      for (let x = searchStartX; x <= searchEndX; x++) {
+        const idx = y * width + x;
+        if (vis[idx] || darkMask[idx] === 0) continue;
         
-        if (compAspect > 1.2 && distToWaterline < 40) {
-          // Valid candidate!
-          candidates.push(comp);
+        // Found a dark pixel, flood-fill it
+        const comp = floodFill(darkMask, vis, width, height, x, y, 128, yTop, yBot, searchStartX, searchEndX);
+        
+        if (comp.area >= MIN_BLOB_AREA) {
+          // We want a high aspect ratio (taller than it is wide)
+          const compAspect = comp.h / Math.max(1, comp.w);
+          // We want it to be anchored near the waterline
+          const distToWaterline = Math.abs(comp.maxY - estimatedWaterlineY);
+          
+          if (compAspect > 1.2 && distToWaterline < 40) {
+            candidates.push(comp);
+          }
         }
+      }
+    }
+    
+    if (candidates.length > 0) {
+      // Sort candidates by distance to the ramp (closest first)
+      candidates.sort((a, b) => Math.abs(a.cx - rampX) - Math.abs(b.cx - rampX));
+      
+      const bestComp = candidates[0];
+      // Score = Area * AspectRatio
+      const score = bestComp.area * (bestComp.h / Math.max(1, bestComp.w));
+      
+      if (score > bestGlobalScore) {
+        bestGlobalScore = score;
+        bestLandingX = rampIsRight ? bestComp.maxX : bestComp.minX;
+        bestLandingFrame = f;
+        bestBlobBox = { x: bestComp.minX / width, y: bestComp.minY / height, w: bestComp.w / width, h: bestComp.h / height };
       }
     }
   }
 
-  let bestLandingX = null;
-  let bestScore = 0;
-
-  // --- Pick the candidate closest to the ramp ---
-  // The physical layout is always Ramp -> Skier -> Boat.
-  // Therefore, among all dark vertical shapes (which might include boat pieces),
-  // the skier is ALWAYS the one closest to the ramp.
-  if (candidates.length > 0) {
-    // Determine the X-coordinate of the ramp
-    let rampX;
-    if (typeof rampNativeStartX !== 'undefined' && typeof rampNativeEndX !== 'undefined') {
-      rampX = rampIsRight ? rampNativeStartX : rampNativeEndX;
-    } else {
-      // If ramp wasn't detected, assume it's at the edge of the screen
-      rampX = rampIsRight ? width : 0;
-    }
-    
-    // Sort candidates by distance to the ramp (closest first)
-    candidates.sort((a, b) => {
-      const distA = Math.abs(a.cx - rampX);
-      const distB = Math.abs(b.cx - rampX);
-      return distA - distB;
-    });
-    
-    const bestComp = candidates[0];
-    bestLandingX = rampIsRight ? bestComp.maxX : bestComp.minX;
-    bestScore = bestComp.area * (bestComp.h / Math.max(1, bestComp.w));
-    
-    blobBox = { x: bestComp.minX / width, y: bestComp.minY / height, w: bestComp.w / width, h: bestComp.h / height };
-    allDetections[scanFrame] = { score: bestScore, box: blobBox };
-  }
-
   // --- Determine final landing position ---
-  if (bestLandingX !== null) {
+  if (bestLandingFrame !== null) {
+    landingFrame = bestLandingFrame;
     landingX = bestLandingX;
-    console.log(`[AI] Best skier silhouette: score=${Math.round(bestScore)}, x=${Math.round(landingX)}`);
+    blobBox = bestBlobBox;
+    allDetections[landingFrame] = { score: bestGlobalScore, box: blobBox };
+    console.log(`[AI] Best skier silhouette found at frame ${landingFrame}: score=${Math.round(bestGlobalScore)}, x=${Math.round(landingX)}`);
   } else {
     // Pure fallback if nothing was found
     landingX = (searchStartX + searchEndX) / 2;
-    console.log(`[AI] No silhouette found — fallback x: ${Math.round(landingX)}`);
+    console.log(`[AI] No silhouette found in entire window — fallback x: ${Math.round(landingX)}`);
   }
   
   console.log('[AI] Final: frame', landingFrame, 'x:', Math.round(landingX));
