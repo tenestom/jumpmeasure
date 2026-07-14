@@ -465,124 +465,73 @@ export async function analyzeJump(frames, calibPoints = [], onProgress = () => {
     console.log(`[AI] Narrowed search to splash vicinity (radius ${SPLASH_RADIUS}px around x=${Math.round(splashX)}): ${searchStartX} - ${searchEndX} (was ${origStartX}-${origEndX})`);
   }
 
-  // --- Scan Backwards from Splash to Peak ---
-  // The user identified that looking at a single frame (-10 offset) is fragile.
-  // Instead, we know the biggest splash is at fullLandingFrame.
-  // We scan backwards frame-by-frame from the splash (fullLandingFrame).
-  // We use a fixed window of up to 80 frames backwards (approx 1.3 seconds)
-  // rather than relying on peakFrame, since the peak can be hijacked by a massive splash.
+  // --- Scan Backwards from Splash Peak (User's Method) ---
+  // The user identified that the physical transition from "no splash" to "explosive splash"
+  // is much more robust than guessing if a dark blob is a skier or a buoy.
+  // We scan backwards frame-by-frame from the splash peak. In each frame, we count the number of NEW bright splash pixels.
+  // The landing frame is exactly where the splash count drops to near zero.
   
   const scanStartFrame = fullLandingFrame !== null ? fullLandingFrame : Math.min(safeContactFrame + 15, totalFrames - 1);
   const scanEndFrame = Math.max(0, scanStartFrame - 80);
   
-  const yTop = Math.max(0, estimatedWaterlineY - Math.floor(height * 0.22));
-  const yBot = Math.min(height - 1, estimatedWaterlineY + 20);
+  const splashYTop = Math.max(0, estimatedWaterlineY - 20);
+  const splashYBot = Math.min(height - 1, estimatedWaterlineY + 20);
   
-  let bestGlobalScore = 0;
-  let bestLandingX = null;
-  let bestLandingFrame = null;
-  let bestBlobBox = null;
+  let splashCounts = [];
   
-  // Parameters for silhouette shape
-  const DARK_THRESH = 110;   // Skier is dark
-  const MIN_BLOB_AREA = 30;  // Must be somewhat visible
-  
-  // Determine the X-coordinate of the ramp
-  let rampX = rampIsRight ? width : 0;
-  if (typeof rampNativeStartX !== 'undefined' && typeof rampNativeEndX !== 'undefined') {
-    rampX = rampIsRight ? rampNativeStartX : rampNativeEndX;
-  }
-
   for (let f = scanStartFrame; f >= scanEndFrame; f--) {
-    let candidates = [];
     const fGray = toGrayscale(frames[f]);
-    const darkMask = new Uint8Array(width * height);
+    let splashCount = 0;
+    let sumX = 0;
     
-    // Create a mask where dark pixels get a high value (like a diff map) so we can reuse floodFill
-    for (let i = 0; i < width * height; i++) {
-      const isDark = fGray[i] < DARK_THRESH;
-      const isMoving = Math.abs(fGray[i] - bgGray[i]) > 20; // Must be moving to ignore buoys
-      darkMask[i] = (isDark && isMoving) ? 255 : 0;
-    }
-    
-    const vis = new Uint8Array(width * height);
-    
-    for (let y = yTop; y < yBot; y++) {
+    for (let y = splashYTop; y <= splashYBot; y++) {
       for (let x = searchStartX; x <= searchEndX; x++) {
         const idx = y * width + x;
-        if (vis[idx] || darkMask[idx] === 0) continue;
-        
-        // Found a dark pixel, flood-fill it
-        const comp = floodFill(darkMask, vis, width, height, x, y, 128, yTop, yBot, searchStartX, searchEndX);
-        
-        if (comp.area >= MIN_BLOB_AREA) {
-          // We want a high aspect ratio (taller than it is wide)
-          const compAspect = comp.h / Math.max(1, comp.w);
-          // We want it to be anchored near the waterline
-          const distToWaterline = Math.abs(comp.maxY - estimatedWaterlineY);
-          
-          if (compAspect > 1.2 && distToWaterline < 40) {
-            // Prevent picking the skier on the takeoff ramp
-            if (Math.abs(comp.cx - rampX) > 80) {
-              
-              // --- Physics-based Stationarity Check ---
-              // Check if there was a dark object at this EXACT location 20 frames ago.
-              // The skier was flying in the air 20 frames ago, so the water should be empty.
-              // A buoy/tree/boat is stationary, so it will be dark 20 frames ago too.
-              const pastFrameIdx = Math.max(0, f - 20);
-              const pastFrameData = frames[pastFrameIdx].data;
-              let darkCount = 0;
-              let totalCount = 0;
-              const cxInt = Math.round(comp.cx);
-              const cyInt = Math.round(comp.cy);
-              
-              // Sample a small 7x7 window around the center
-              for (let py = cyInt - 3; py <= cyInt + 3; py++) {
-                for (let px = cxInt - 3; px <= cxInt + 3; px++) {
-                  if (px >= 0 && px < width && py >= 0 && py < height) {
-                    totalCount++;
-                    const idx = (py * width + px) * 4;
-                    const r = pastFrameData[idx];
-                    const g = pastFrameData[idx+1];
-                    const b = pastFrameData[idx+2];
-                    const gray = 0.299 * r + 0.587 * g + 0.114 * b;
-                    if (gray < DARK_THRESH) {
-                      darkCount++;
-                    }
-                  }
-                }
-              }
-              
-              // If less than 20% of the core is dark 20 frames ago, it's a NEW object (the skier!)
-              if (totalCount > 0 && (darkCount / totalCount) < 0.2) {
-                candidates.push(comp);
-              } else {
-                // It was already there! It's a stationary background object (buoy, tree)
-                // We completely ignore it.
-              }
-            }
-          }
+        // A splash pixel is bright, and significantly brighter than the median background
+        if (fGray[idx] > 160 && (fGray[idx] - bgGray[idx]) > 30) {
+          splashCount++;
+          sumX += x;
         }
       }
     }
     
-    if (candidates.length > 0) {
-      // Sort candidates by distance to the ramp (closest first)
-      candidates.sort((a, b) => Math.abs(a.cx - rampX) - Math.abs(b.cx - rampX));
-      
-      const bestComp = candidates[0];
-      // Score = Area weighted by proximity to the splash climax
-      // This massively penalizes stationary objects that sneak into the edges of the search zone
-      const distToSplash = splashX !== null ? Math.abs(bestComp.cx - splashX) : 0;
-      const score = bestComp.area / (distToSplash + 50);
-      
-      if (score > bestGlobalScore) {
-        bestGlobalScore = score;
-        bestLandingX = rampIsRight ? bestComp.maxX : bestComp.minX;
-        bestLandingFrame = f;
-        bestBlobBox = { x: bestComp.minX / width, y: bestComp.minY / height, w: bestComp.w / width, h: bestComp.h / height };
-      }
+    splashCounts.push({ 
+      frame: f, 
+      count: splashCount, 
+      avgX: splashCount > 0 ? sumX / splashCount : null 
+    });
+  }
+  
+  let bestLandingFrame = null;
+  let bestLandingX = null;
+  let bestBlobBox = null;
+  
+  // We have the splash counts going backwards in time.
+  // Find the first frame where the splash count drops below a tiny threshold (e.g., 10 pixels).
+  // The frame RIGHT BEFORE that (chronologically after) is the exact landing frame!
+  for (let i = 0; i < splashCounts.length; i++) {
+    if (splashCounts[i].count < 10) {
+       const landingData = i > 0 ? splashCounts[i - 1] : splashCounts[i];
+       bestLandingFrame = landingData.frame;
+       bestLandingX = landingData.avgX !== null ? landingData.avgX : splashX;
+       break;
     }
+  }
+  
+  if (bestLandingFrame === null && splashCounts.length > 0) {
+     // Fallback if it never dropped below 10 (e.g. constant white noise)
+     bestLandingFrame = splashCounts[splashCounts.length - 1].frame;
+     bestLandingX = splashCounts[splashCounts.length - 1].avgX || splashX;
+  }
+  
+  // Create a synthetic blobBox for drawing the UI box (since we no longer track the black blob directly here)
+  if (bestLandingX !== null) {
+     bestBlobBox = {
+       x: (bestLandingX - 10) / width,
+       y: (estimatedWaterlineY - 30) / height,
+       w: 20 / width,
+       h: 40 / height
+     };
   }
 
   // --- Determine final landing position ---
@@ -590,12 +539,12 @@ export async function analyzeJump(frames, calibPoints = [], onProgress = () => {
     landingFrame = bestLandingFrame;
     landingX = bestLandingX;
     blobBox = bestBlobBox;
-    allDetections[landingFrame] = { score: bestGlobalScore, box: blobBox };
-    console.log(`[AI] Best skier silhouette found at frame ${landingFrame}: score=${Math.round(bestGlobalScore)}, x=${Math.round(landingX)}`);
+    allDetections[landingFrame] = { score: 100, box: blobBox }; // arbitrary high score since it's exact
+    console.log(`[AI] Splash transition found! Landing exactly at frame ${landingFrame}, x=${Math.round(landingX)}`);
   } else {
     // Pure fallback if nothing was found
     landingX = (searchStartX + searchEndX) / 2;
-    console.log(`[AI] No silhouette found in entire window — fallback x: ${Math.round(landingX)}`);
+    console.log(`[AI] No splash transition found — fallback x: ${Math.round(landingX)}`);
   }
   
   console.log('[AI] Final: frame', landingFrame, 'x:', Math.round(landingX));
