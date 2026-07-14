@@ -470,19 +470,12 @@ export async function analyzeJump(frames, calibPoints = [], onProgress = () => {
     console.log(`[AI] Adjusted for ramp exclusion: ${searchStartX} - ${searchEndX}`);
   }
 
-  // --- Narrow Search Zone to Splash Vicinity ---
-  // The skier landing is ALWAYS where the splash is.
-  // If we found the splashX (from the tracking data's maxCyFrame), we can strictly
-  // limit our search to a small window around it. This guarantees we ignore
-  // buoys or stationary objects on the other side of the lake.
-  if (splashX !== null) {
-    const SPLASH_RADIUS = 150; // pixels (narrowed to aggressively exclude buoys)
-    const origStartX = searchStartX;
-    const origEndX = searchEndX;
-    searchStartX = Math.max(searchStartX, Math.floor(splashX - SPLASH_RADIUS));
-    searchEndX = Math.min(searchEndX, Math.ceil(splashX + SPLASH_RADIUS));
-    console.log(`[AI] Narrowed search to splash vicinity (radius ${SPLASH_RADIUS}px around x=${Math.round(splashX)}): ${searchStartX} - ${searchEndX} (was ${origStartX}-${origEndX})`);
-  }
+  // --- Broad X Search ---
+  // We explicitly do NOT narrow the X search zone based on splashX.
+  // The skier moves horizontally very fast. If we restrict X, we might miss the initial
+  // splash because it happens outside the box, causing the landing to be detected "too late".
+  // Because our Y-band (below) is tightly restricted to the physical bottom of the splash,
+  // we safely ignore the boat wake without needing an X-restriction.
 
   // --- Scan Backwards from Splash Peak (User's Method) ---
   // The user identified that the physical transition from "no splash" to "explosive splash"
