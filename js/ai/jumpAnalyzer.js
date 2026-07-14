@@ -408,18 +408,29 @@ export async function analyzeJump(frames, onProgress = () => {}) {
   const allDetections = new Array(totalFrames).fill(null);
   
   // Collect reliable post-peak tracking points (detected, reasonable size)
-  const reliablePostPeak = trackingData.filter(t =>
+  let reliablePostPeak = trackingData.filter(t =>
     t.detected &&
     t.frame >= peakFrame.frame &&
     t.frame <= Math.min(safeContactFrame, totalFrames - 1) &&
     t.area < 12000 && t.area > 80
   );
+  // Fallback: loosen area filter if nothing found
+  if (reliablePostPeak.length < 3) {
+    reliablePostPeak = trackingData.filter(t =>
+      t.detected &&
+      t.frame >= peakFrame.frame &&
+      t.frame <= Math.min(safeContactFrame, totalFrames - 1)
+    );
+    if (reliablePostPeak.length > 0)
+      console.log('[AI] Using loose post-peak filter:', reliablePostPeak.length, 'points');
+  }
   console.log('[AI] Reliable post-peak points:', reliablePostPeak.length);
   
   // Fit linear trajectory to cx and cy
+  const hasTrajectory = reliablePostPeak.length >= 3;
   let trajCxSlope = 0, trajCxIntercept = peakFrame.cx;
   let trajCySlope = 3, trajCyIntercept = peakFrame.cy;
-  if (reliablePostPeak.length >= 3) {
+  if (hasTrajectory) {
     const fv = reliablePostPeak.map(t => t.frame);
     const cxFit = fitLinear1D(fv, reliablePostPeak.map(t => t.cx));
     const cyFit = fitLinear1D(fv, reliablePostPeak.map(t => t.cy));
@@ -427,6 +438,8 @@ export async function analyzeJump(frames, onProgress = () => {}) {
     trajCySlope = cyFit.slope; trajCyIntercept = cyFit.intercept;
     console.log('[AI] Trajectory fit: cx =', trajCxSlope.toFixed(2), '* f +', trajCxIntercept.toFixed(0),
       ' | cy =', trajCySlope.toFixed(2), '* f +', trajCyIntercept.toFixed(0));
+  } else {
+    console.log('[AI] No trajectory — using wide search around peakFrame cx:', peakFrame.cx);
   }
   
   // Last reliable flight blob for visualization
@@ -449,14 +462,16 @@ export async function analyzeJump(frames, onProgress = () => {}) {
     ? (rampNativeStartX || Math.floor(width * 0.7))
     : (rampNativeEndX  || Math.floor(width * 0.3));
   
-  // Raw grayscale scan constants
-  const SEARCH_HALF_W = 100; // search ±100px around predicted cx
+  // Search width: narrow when we have trajectory, wide when we don't
+  const SEARCH_HALF_W = hasTrajectory ? 120 : 300;
   const SKIER_MAX_H   = Math.floor(height * 0.22);
   const DARK_MIN      = 8;   // min brightness contrast (outer-inner)
   const DARK_ROWS_MIN = 40;  // min height of dark region in pixels
   
-  const scanFrom = Math.max(0, (fullLandingFrame || safeContactFrame) - 20);
-  const scanTo   = Math.min(totalFrames - 1, (fullLandingFrame || safeContactFrame) + 5);
+  // Wider scan window when trajectory is uncertain
+  const scanAnchor = fullLandingFrame || safeContactFrame;
+  const scanFrom = Math.max(0, scanAnchor - 30);
+  const scanTo   = Math.min(totalFrames - 1, scanAnchor + 5);
   
   let bestScore = -1, bestFrame = landingFrame, bestLandingX = null;
   
