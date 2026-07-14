@@ -212,12 +212,14 @@ export async function analyzeJump(frames, calibPoints = [], onProgress = () => {
     t.detected && t.frame > peakFrame.frame && t.frame <= safeContactFrame + 40
   );
   
+  let splashX = null;
   if (postPeakDetected.length > 0) {
     // Find frame with maximum cy (lowest point in image = full water contact)
     const maxCyFrame = postPeakDetected.reduce((best, t) => 
       t.cy > best.cy ? t : best
     );
     fullLandingFrame = maxCyFrame.frame;
+    splashX = maxCyFrame.cx;
   }
   
   // Apply offset: go back 10 frames = rear ski tip contact
@@ -447,6 +449,20 @@ export async function analyzeJump(frames, calibPoints = [], onProgress = () => {
       searchStartX = Math.max(searchStartX, rampNativeEndX + 50);
     }
     console.log(`[AI] Adjusted for ramp exclusion: ${searchStartX} - ${searchEndX}`);
+  }
+
+  // --- Narrow Search Zone to Splash Vicinity ---
+  // The skier landing is ALWAYS where the splash is.
+  // If we found the splashX (from the tracking data's maxCyFrame), we can strictly
+  // limit our search to a small window around it. This guarantees we ignore
+  // buoys or stationary objects on the other side of the lake.
+  if (splashX !== null) {
+    const SPLASH_RADIUS = 250; // pixels
+    const origStartX = searchStartX;
+    const origEndX = searchEndX;
+    searchStartX = Math.max(searchStartX, Math.floor(splashX - SPLASH_RADIUS));
+    searchEndX = Math.min(searchEndX, Math.ceil(splashX + SPLASH_RADIUS));
+    console.log(`[AI] Narrowed search to splash vicinity (radius ${SPLASH_RADIUS}px around x=${Math.round(splashX)}): ${searchStartX} - ${searchEndX} (was ${origStartX}-${origEndX})`);
   }
 
   // --- Scan Backwards from Splash to Peak ---
