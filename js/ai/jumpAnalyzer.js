@@ -474,8 +474,8 @@ export async function analyzeJump(frames, calibPoints = [], onProgress = () => {
   const scanStartFrame = fullLandingFrame !== null ? fullLandingFrame : Math.min(safeContactFrame + 15, totalFrames - 1);
   const scanEndFrame = Math.max(0, scanStartFrame - 80);
   
-  const splashYTop = Math.max(0, estimatedWaterlineY - 20);
-  const splashYBot = Math.min(height - 1, estimatedWaterlineY + 20);
+  const splashYTop = Math.max(0, estimatedWaterlineY - 10);
+  const splashYBot = Math.min(height - 1, estimatedWaterlineY + 10);
   
   let splashCounts = [];
   
