@@ -399,195 +399,143 @@ export async function analyzeJump(frames, onProgress = () => {}) {
     }
   }
   
-  // STEP 2: TRAJECTORY FIT + RAW GRAYSCALE SILHOUETTE SEARCH
-  // 1. Fit linear model to post-peak tracking data → predicted position per frame
-  // 2. For each frame in landing window: search raw grayscale at predicted position
-  // 3. Score: dark vertical silhouette against lighter surroundings (no diff needed)
+  // STEP 2: MULTI-OBJECT TRACKER — track every significant moving blob across all frames.
+  // Only two objects move fast in this scene: the boat and the skier.
+  // They are distinguished by VERTICAL displacement:
+  //   Skier: large Y range (goes up on ramp → flies → lands) ← unique parabola
+  //   Boat:  tiny Y range (stays at waterline throughout)
+  // No shape scoring, no waterline detection, no ramp reference needed.
   
   let blobBox = null;
   const allDetections = new Array(totalFrames).fill(null);
   
-  // Collect reliable post-peak tracking points (detected, reasonable size)
-  let reliablePostPeak = trackingData.filter(t =>
-    t.detected &&
-    t.frame >= peakFrame.frame &&
-    t.frame <= Math.min(safeContactFrame, totalFrames - 1) &&
-    t.area < 12000 && t.area > 80
-  );
-  // Fallback: loosen area filter if nothing found
-  if (reliablePostPeak.length < 3) {
-    reliablePostPeak = trackingData.filter(t =>
-      t.detected &&
-      t.frame >= peakFrame.frame &&
-      t.frame <= Math.min(safeContactFrame, totalFrames - 1)
-    );
-    if (reliablePostPeak.length > 0)
-      console.log('[AI] Using loose post-peak filter:', reliablePostPeak.length, 'points');
-  }
-  console.log('[AI] Reliable post-peak points:', reliablePostPeak.length);
+  const DIFF_THRESH   = 20;
+  const MIN_BLOB_AREA = 200;   // skip tiny noise
+  const MAX_BLOB_AREA = 50000; // skip huge water reflections
+  const MATCH_RADIUS  = 120;   // px: max blob centroid jump between frames for same track
+  const MAX_GAP       = 3;     // frames a track may be missing before it's closed
+  const MIN_TRACK_LEN = 8;     // minimum frames to be a valid track
+  const ROI_BOT       = Math.floor(height * 0.68); // ignore deep water area
   
-  // Fit linear trajectory to cx and cy
-  const hasTrajectory = reliablePostPeak.length >= 3;
-  let trajCxSlope = 0, trajCxIntercept = peakFrame.cx;
-  let trajCySlope = 3, trajCyIntercept = peakFrame.cy;
-  if (hasTrajectory) {
-    const fv = reliablePostPeak.map(t => t.frame);
-    const cxFit = fitLinear1D(fv, reliablePostPeak.map(t => t.cx));
-    const cyFit = fitLinear1D(fv, reliablePostPeak.map(t => t.cy));
-    trajCxSlope = cxFit.slope; trajCxIntercept = cxFit.intercept;
-    trajCySlope = cyFit.slope; trajCyIntercept = cyFit.intercept;
-    console.log('[AI] Trajectory fit: cx =', trajCxSlope.toFixed(2), '* f +', trajCxIntercept.toFixed(0),
-      ' | cy =', trajCySlope.toFixed(2), '* f +', trajCyIntercept.toFixed(0));
-  } else {
-    console.log('[AI] No trajectory — using wide search around peakFrame cx:', peakFrame.cx);
-  }
+  // Phase 1: find all significant blobs per frame
+  const trackScanEnd = Math.min(totalFrames - 1, (safeContactFrame || totalFrames - 1) + 25);
+  const tracks = [];
   
-  // Last reliable flight blob for visualization
-  const lastFlightBlob = reliablePostPeak.length > 0 ?
-    reliablePostPeak[reliablePostPeak.length - 1] : null;
-  const predBlobBox = lastFlightBlob ? {
-    x: lastFlightBlob.bbox.x / width, y: lastFlightBlob.bbox.y / height,
-    w: lastFlightBlob.bbox.w / width, h: lastFlightBlob.bbox.h / height,
-  } : null;
-  
-  // Waterline Y: use ramp base if detected, else estimate from trajectory
-  const estimatedWaterlineY = rampNativeY ||
-    (lastFlightBlob
-      ? Math.round(lastFlightBlob.cy + trajCySlope * (safeContactFrame - lastFlightBlob.frame))
-      : Math.floor(height * 0.25));
-  console.log('[AI] Estimated waterline Y:', estimatedWaterlineY);
-  
-  // Ramp exclusion zone (X)
-  const rampEdge = rampIsRight
-    ? (rampNativeStartX || Math.floor(width * 0.7))
-    : (rampNativeEndX  || Math.floor(width * 0.3));
-  
-  // Search width: narrow when we have trajectory, wide when we don't
-  const SEARCH_HALF_W = hasTrajectory ? 120 : 300;
-  const SKIER_MAX_H   = Math.floor(height * 0.22);
-  const DARK_MIN      = 8;   // min brightness contrast (outer-inner)
-  const DARK_ROWS_MIN = 40;  // min height of dark region in pixels
-  
-  // Wider scan window when trajectory is uncertain
-  const scanAnchor = fullLandingFrame || safeContactFrame;
-  const scanFrom = Math.max(0, scanAnchor - 30);
-  const scanTo   = Math.min(totalFrames - 1, scanAnchor + 5);
-  
-  let bestScore = -1, bestFrame = landingFrame, bestLandingX = null;
-  
-  for (let f = scanFrom; f <= scanTo; f++) {
-    // Predict cx from trajectory
-    const predCx = Math.round(Math.max(0, Math.min(width - 1,
-      trajCxSlope * f + trajCxIntercept)));
-    
-    // Y search band: from waterline up by skier height, to waterline + small margin
-    const yTop   = Math.max(0, estimatedWaterlineY - SKIER_MAX_H);
-    const yBot   = Math.min(height - 1, estimatedWaterlineY + Math.floor(height * 0.04));
-    const stripH = yBot - yTop;
-    if (stripH < 20) continue;
-    
-    // X search band around predicted cx
-    const xLeft  = Math.max(0, predCx - SEARCH_HALF_W);
-    const xRight = Math.min(width - 1, predCx + SEARCH_HALF_W);
-    
+  for (let f = 0; f <= trackScanEnd; f++) {
     const fGray = toGrayscale(frames[f]);
-    
-    // Column mean brightness in search band
-    const colBright = new Float32Array(width).fill(0);
-    for (let x = xLeft; x <= xRight; x++) {
-      let s = 0;
-      for (let y = yTop; y <= yBot; y++) s += fGray[y * width + x];
-      colBright[x] = s / stripH;
+    const fDiff = new Uint8Array(width * height);
+    for (let i = 0; i < fGray.length; i++) {
+      fDiff[i] = Math.min(255, Math.abs(fGray[i] - bgGray[i]));
     }
     
-    // Slide windows of varying widths to find a dark vertical silhouette
-    let frameScore = -1, frameBestBox = null;
-    const surround = 20; // columns on each side for contrast measurement
+    const visited = new Uint8Array(width * height);
+    const frameBlobs = [];
     
-    for (let w = 15; w <= 80; w += 3) {
-      for (let x0 = xLeft + surround; x0 <= xRight - w - surround; x0++) {
-        // Skip ramp zone
-        const cxMid = x0 + Math.floor(w / 2);
-        if (rampIsRight && cxMid > rampEdge - rampFullWidth) continue;
-        if (!rampIsRight && cxMid < rampEdge + rampFullWidth) continue;
-        
-        // Column contrast: inner vs outer
-        let inner = 0;
-        for (let dx = 0; dx < w; dx++) inner += colBright[x0 + dx];
-        inner /= w;
-        
-        let outer = 0, outN = 0;
-        for (let dx = -surround; dx < 0 && x0 + dx >= xLeft; dx++) {
-          outer += colBright[x0 + dx]; outN++;
-        }
-        for (let dx = w; dx < w + surround && x0 + dx <= xRight; dx++) {
-          outer += colBright[x0 + dx]; outN++;
-        }
-        if (outN === 0 || outer / outN - inner < DARK_MIN) continue;
-        const darkness = outer / outN - inner;
-        
-        // Row-by-row: count vertically dark rows in this strip
-        let darkRows = 0, topY2 = yBot, botY2 = yTop;
-        for (let y = yTop; y <= yBot; y++) {
-          let rowIn = 0;
-          for (let dx = 0; dx < w; dx++) rowIn += fGray[y * width + x0 + dx];
-          rowIn /= w;
-          let rowOut = 0, rowN = 0;
-          for (let dx = -surround; dx < 0 && x0 + dx >= 0; dx++) {
-            rowOut += fGray[y * width + x0 + dx]; rowN++;
-          }
-          for (let dx = w; dx < w + surround && x0 + dx < width; dx++) {
-            rowOut += fGray[y * width + x0 + dx]; rowN++;
-          }
-          if (rowN === 0) continue;
-          if (rowOut / rowN - rowIn > DARK_MIN) {
-            darkRows++; topY2 = Math.min(topY2, y); botY2 = Math.max(botY2, y);
-          }
-        }
-        if (darkRows < DARK_ROWS_MIN) continue;
-        
-        const blobH = botY2 - topY2 + 1;
-        const aspect = blobH / w;
-        if (aspect < 1.2 || aspect > 6) continue;
-        
-        const score = darkness * (darkRows / stripH) * Math.min(aspect / 2.5, 1) * 100;
-        if (score > frameScore) {
-          frameScore = score;
-          frameBestBox = { minX: x0, minY: topY2, maxX: x0 + w, maxY: botY2, w, h: blobH };
+    for (let y = 0; y < ROI_BOT; y++) {
+      for (let x = 0; x < width; x++) {
+        const idx = y * width + x;
+        if (visited[idx] || fDiff[idx] < DIFF_THRESH) continue;
+        const comp = floodFill(fDiff, visited, width, height, x, y, DIFF_THRESH, 0, ROI_BOT, 0, width);
+        if (comp.area >= MIN_BLOB_AREA && comp.area <= MAX_BLOB_AREA) {
+          frameBlobs.push(comp);
         }
       }
     }
     
-    if (frameBestBox && frameScore > 15) {
-      const nativeX = rampIsRight ? frameBestBox.maxX : frameBestBox.minX;
-      const det = {
-        score: frameScore,
-        box: {
-          x: frameBestBox.minX / width, y: frameBestBox.minY / height,
-          w: frameBestBox.w / width,   h: frameBestBox.h / height,
-        },
-        nativeX,
+    // Phase 2: nearest-neighbour matching to existing tracks
+    const usedTracks = new Set();
+    const unmatched  = [];
+    
+    for (const blob of frameBlobs) {
+      let bestIdx = -1, bestDist = MATCH_RADIUS;
+      for (let t = 0; t < tracks.length; t++) {
+        if (usedTracks.has(t)) continue;
+        const tr = tracks[t];
+        if (f - tr.lastFrame > MAX_GAP) continue;
+        const lp = tr.points[tr.points.length - 1];
+        const d  = Math.hypot(blob.cx - lp.cx, blob.cy - lp.cy);
+        if (d < bestDist) { bestDist = d; bestIdx = t; }
+      }
+      if (bestIdx >= 0) {
+        tracks[bestIdx].points.push({
+          frame: f, cx: blob.cx, cy: blob.cy, area: blob.area,
+          minX: blob.minX, minY: blob.minY, w: blob.w, h: blob.h,
+        });
+        tracks[bestIdx].lastFrame = f;
+        usedTracks.add(bestIdx);
+      } else {
+        unmatched.push(blob);
+      }
+    }
+    for (const blob of unmatched) {
+      tracks.push({
+        points: [{ frame: f, cx: blob.cx, cy: blob.cy, area: blob.area,
+          minX: blob.minX, minY: blob.minY, w: blob.w, h: blob.h }],
+        lastFrame: f,
+      });
+    }
+    
+    if (f % 30 === 0) await yieldToUI();
+  }
+  
+  // Phase 3: identify skier track = longest Y-range track
+  let skierTrack  = null;
+  let maxYRange   = 0;
+  console.log('[AI] Total tracks:', tracks.length);
+  
+  for (const tr of tracks) {
+    if (tr.points.length < MIN_TRACK_LEN) continue;
+    const cys    = tr.points.map(p => p.cy);
+    const yRange = Math.max(...cys) - Math.min(...cys);
+    if (yRange > maxYRange) { maxYRange = yRange; skierTrack = tr; }
+  }
+  console.log('[AI] Skier track: points=', skierTrack ? skierTrack.points.length : 0,
+    'yRange=', Math.round(maxYRange));
+  
+  // Phase 4: derive landing frame and X from skier track
+  let predBlobBox = null;
+  
+  if (skierTrack) {
+    // Store all track boxes in allDetections for per-frame visualization
+    for (const pt of skierTrack.points) {
+      allDetections[pt.frame] = {
+        score: 80,
+        box: { x: pt.minX / width, y: pt.minY / height, w: pt.w / width, h: pt.h / height },
       };
-      allDetections[f] = det;
-      if (frameScore > bestScore) {
-        bestScore = frameScore; bestFrame = f;
-        bestLandingX = nativeX; blobBox = det.box;
-      }
     }
-  }
-  
-  // Best detection → measurement frame and X
-  if (bestLandingX !== null) {
-    landingFrame = bestFrame; landingX = bestLandingX;
-    console.log('[AI] Best skier (raw gray): frame', bestFrame,
-      'score', bestScore.toFixed(1), 'x', bestLandingX);
+    
+    // Full landing = frame with maximum cy (deepest in image = skier touching water)
+    const maxCy     = Math.max(...skierTrack.points.map(p => p.cy));
+    const fullLandPt = skierTrack.points.find(p => p.cy === maxCy);
+    
+    // Measurement frame = back-skis contact = ~10 frames before full landing
+    const measTarget = Math.max(0, fullLandPt.frame - 10);
+    const measPt     = skierTrack.points.reduce((best, p) =>
+      Math.abs(p.frame - measTarget) < Math.abs(best.frame - measTarget) ? p : best);
+    
+    landingFrame = measPt.frame;
+    // Measurement X = edge of blob closest to ramp
+    landingX = rampIsRight ? measPt.minX + measPt.w : measPt.minX;
+    blobBox  = { x: measPt.minX / width, y: measPt.minY / height,
+                 w: measPt.w / width,   h: measPt.h / height };
+    
+    // predBlobBox = last point before full landing (in-flight position)
+    const preLandIdx = skierTrack.points.indexOf(fullLandPt) - 1;
+    if (preLandIdx >= 0) {
+      const pp = skierTrack.points[preLandIdx];
+      predBlobBox = { x: pp.minX / width, y: pp.minY / height, w: pp.w / width, h: pp.h / height };
+    }
+    
+    console.log('[AI] Full landing: frame', fullLandPt.frame, 'cy=', Math.round(maxCy));
+    console.log('[AI] Final: frame', landingFrame, 'x:', Math.round(landingX));
   } else {
-    landingX = (lastFlightBlob ? lastFlightBlob.cx : null) || width / 2;
-    console.log('[AI] No raw-gray skier found — fallback x:', Math.round(landingX));
+    // Fallback: use peak cx from blob tracker
+    landingX = peakFrame ? peakFrame.cx : width / 2;
+    console.log('[AI] No skier track — fallback x:', Math.round(landingX));
   }
   
-  console.log('[AI] Final: frame', landingFrame, 'x:', Math.round(landingX));
-  
+  // 1. Fit linear model to post-peak tracking data → predicted position per frame
+
 
   // Normalize landing X to 0..1
   const landingXNorm = landingX !== null ? landingX / width : null;

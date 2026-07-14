@@ -105,7 +105,36 @@ export function drawLine(ox, oy, vw, vh) {
     ctx.fillText('RAMP', rpx + 14, rpy + 4);
   }
   
+  // Draw full skier trajectory from allDetections (all track points as green polyline)
+  if (state.allDetections && state.allDetections.length > 0) {
+    const trackPts = [];
+    for (let f = 0; f < state.allDetections.length; f++) {
+      const det = state.allDetections[f];
+      if (!det) continue;
+      trackPts.push({
+        x: ox + (det.box.x + det.box.w / 2) * vw,
+        y: oy + (det.box.y + det.box.h / 2) * vh,
+      });
+    }
+    if (trackPts.length > 1) {
+      ctx.beginPath();
+      ctx.moveTo(trackPts[0].x, trackPts[0].y);
+      for (let i = 1; i < trackPts.length; i++) ctx.lineTo(trackPts[i].x, trackPts[i].y);
+      ctx.strokeStyle = 'rgba(50, 220, 80, 0.75)';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([]);
+      ctx.stroke();
+    }
+    for (const tp of trackPts) {
+      ctx.beginPath();
+      ctx.arc(tp.x, tp.y, 4, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(50, 220, 80, 0.85)';
+      ctx.fill();
+    }
+  }
+  
   // Draw per-frame skier detection from allDetections[]
+
   const frameDetection = state.allDetections && state.allDetections[state.replayIndex];
   const isMeasurementFrame = state.replayIndex === Math.round((state.lineX || 0) * (state.aiFrameWidth || vw) / (state.aiFrameWidth || vw) * (state.frames ? state.frames.length - 1 : 0));
   
