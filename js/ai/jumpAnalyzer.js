@@ -113,7 +113,7 @@ export async function analyzeJump(frames, calibPoints = [], onProgress = () => {
       const cropData = cropImageData(frames[candidate.frame], candidate.cx, candidate.cy, 300, 300);
       cropCtx.putImageData(cropData, 0, 0);
       const predictions = await mlModel.detect(cropCanvas, 10, 0.20);
-      const person = predictions.find(p => p.class === 'person' || p.class === 'skis' || p.class === 'surfboard');
+      const person = predictions.find(p => p.class === 'person');
       
       if (person) {
          // 2. Validate that it is a falling object (skier) by tracking 5 frames forward
@@ -131,7 +131,7 @@ export async function analyzeJump(frames, calibPoints = [], onProgress = () => {
              const cData = cropImageData(frames[f], cX, cY, 300, 300);
              cropCtx.putImageData(cData, 0, 0);
              const preds = await mlModel.detect(cropCanvas, 10, 0.15);
-             const p2 = preds.find(p => p.class === 'person' || p.class === 'skis' || p.class === 'surfboard');
+             const p2 = preds.find(p => p.class === 'person');
              if (p2) {
                  const newX = cX + p2.bbox[0] + p2.bbox[2]/2;
                  const newY = cY + p2.bbox[1] + p2.bbox[3]/2;
@@ -200,7 +200,7 @@ export async function analyzeJump(frames, calibPoints = [], onProgress = () => {
       cropCtx.putImageData(cropData, 0, 0);
       
       const predictions = await mlModel.detect(cropCanvas, 10, 0.15);
-      const person = predictions.find(p => p.class === 'person' || p.class === 'surfboard' || p.class === 'skis');
+      const person = predictions.find(p => p.class === 'person');
       
       if (person) {
         currX = cropX + person.bbox[0] + person.bbox[2]/2;
