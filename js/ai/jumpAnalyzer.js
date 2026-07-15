@@ -104,18 +104,56 @@ export async function analyzeJump(frames, calibPoints = [], onProgress = () => {
   
   let peakFrame = significantFrames[0];
   if (mlModel) {
-    onProgress(0.4, 'Verifying peak candidate with ML...');
+    onProgress(0.4, 'Verifying peak candidates with ML...');
     const candidatePeaks = [...significantFrames].sort((a, b) => a.cy - b.cy);
     for (const candidate of candidatePeaks) {
+      // 1. Initial detection at candidate
+      const cropCanvas = new OffscreenCanvas(300, 300);
+      const cropCtx = cropCanvas.getContext('2d', { willReadFrequently: true });
       const cropData = cropImageData(frames[candidate.frame], candidate.cx, candidate.cy, 300, 300);
       cropCtx.putImageData(cropData, 0, 0);
-      const predictions = await mlModel.detect(cropCanvas, 10, 0.35);
+      const predictions = await mlModel.detect(cropCanvas, 10, 0.20);
       const person = predictions.find(p => p.class === 'person' || p.class === 'skis' || p.class === 'surfboard');
       
       if (person) {
-         peakFrame = candidate;
-         console.log(`[AI] ML Confirmed true peak at frame ${candidate.frame} (Y=${candidate.cy})`);
-         break;
+         // 2. Validate that it is a falling object (skier) by tracking 5 frames forward
+         let validTrack = true;
+         let currX = candidate.cx - 150 + person.bbox[0] + person.bbox[2]/2;
+         let currY = candidate.cy - 150 + person.bbox[1] + person.bbox[3]/2;
+         let velX = 0, velY = 2; // assume some downward velocity
+         
+         let successfulFrames = 0;
+         const testFrames = Math.min(10, totalFrames - candidate.frame - 1);
+         for (let i = 1; i <= testFrames; i++) {
+             const f = candidate.frame + i;
+             const cX = currX + velX - 150;
+             const cY = currY + velY - 150;
+             const cData = cropImageData(frames[f], cX, cY, 300, 300);
+             cropCtx.putImageData(cData, 0, 0);
+             const preds = await mlModel.detect(cropCanvas, 10, 0.15);
+             const p2 = preds.find(p => p.class === 'person' || p.class === 'skis' || p.class === 'surfboard');
+             if (p2) {
+                 const newX = cX + p2.bbox[0] + p2.bbox[2]/2;
+                 const newY = cY + p2.bbox[1] + p2.bbox[3]/2;
+                 velX = newX - currX;
+                 velY = newY - currY;
+                 currX = newX;
+                 currY = newY;
+                 successfulFrames++;
+             } else {
+                 currX += velX;
+                 currY += velY;
+             }
+         }
+         
+         // If we tracked it successfully for at least 3 of the next 10 frames, and it fell downwards
+         if (successfulFrames >= 3 && currY > candidate.cy + 10) {
+             peakFrame = candidate;
+             console.log(`[AI] ML Confirmed true peak at frame ${candidate.frame} (Y=${candidate.cy}, Tracked downwards!)`);
+             break;
+         } else {
+             console.log(`[AI] Rejected candidate peak at frame ${candidate.frame} (Found object, but didn't fall like a skier)`);
+         }
       } else {
          console.log(`[AI] Rejected candidate peak at frame ${candidate.frame} (No person found)`);
       }
