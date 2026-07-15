@@ -63,6 +63,9 @@ export async function analyzeJump(frames, calibPoints = [], onProgress = () => {
   const waterlineY = Math.floor(height * 0.55);
   const trackingData = [];
   const allBlobsData = [];
+  
+  let prevGray = toGrayscale(frames[0]);
+  
   for (let f = 1; f < totalFrames; f++) {
     onProgress(0.2 + 0.1 * (f / totalFrames), `Motion tracking frame ${f}...`);
     await yieldToUI();
@@ -70,8 +73,9 @@ export async function analyzeJump(frames, calibPoints = [], onProgress = () => {
     const gray = toGrayscale(frames[f]);
     const diff = new Uint8Array(width * height);
     for (let i = 0; i < gray.length; i++) {
-      diff[i] = Math.min(255, Math.abs(gray[i] - bgGray[i]));
+      diff[i] = Math.min(255, Math.abs(gray[i] - prevGray[i]));
     }
+    prevGray = gray; // update prevGray for the next frame
     
     const blobs = findAllBlobs(diff, width, height, 0, waterlineY, 25);
     if (blobs.length > 0) {
@@ -105,7 +109,7 @@ export async function analyzeJump(frames, calibPoints = [], onProgress = () => {
     for (const candidate of candidatePeaks) {
       const cropData = cropImageData(frames[candidate.frame], candidate.cx, candidate.cy, 300, 300);
       cropCtx.putImageData(cropData, 0, 0);
-      const predictions = await mlModel.detect(cropCanvas, 10, 0.15);
+      const predictions = await mlModel.detect(cropCanvas, 10, 0.35);
       const person = predictions.find(p => p.class === 'person' || p.class === 'skis' || p.class === 'surfboard');
       
       if (person) {
@@ -158,7 +162,7 @@ export async function analyzeJump(frames, calibPoints = [], onProgress = () => {
       cropCtx.putImageData(cropData, 0, 0);
       
       const predictions = await mlModel.detect(cropCanvas, 10, 0.15);
-      const person = predictions.find(p => p.class === 'person' || p.class === 'surfboard' || p.class === 'skis' || p.class === 'boat');
+      const person = predictions.find(p => p.class === 'person' || p.class === 'surfboard' || p.class === 'skis');
       
       if (person) {
         currX = cropX + person.bbox[0] + person.bbox[2]/2;
