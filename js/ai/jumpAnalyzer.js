@@ -62,29 +62,35 @@ export async function analyzeJump(frames, calibPoints = [], onProgress = () => {
   onProgress(0.1, 'Detecting motion...');
   const waterlineY = Math.floor(height * 0.55);
   const trackingData = [];
-  
-  for (let f = 0; f < totalFrames; f++) {
-    if (f % 5 === 0) {
-      onProgress(0.1 + 0.3 * (f / totalFrames), `Analyzing motion frame ${f + 1}/${totalFrames}...`);
-      await yieldToUI();
-    }
+  const allBlobsData = [];
+  for (let f = 1; f < totalFrames; f++) {
+    onProgress(0.2 + 0.1 * (f / totalFrames), `Motion tracking frame ${f}...`);
+    await yieldToUI();
+    
     const gray = toGrayscale(frames[f]);
     const diff = new Uint8Array(width * height);
     for (let i = 0; i < gray.length; i++) {
       diff[i] = Math.min(255, Math.abs(gray[i] - bgGray[i]));
     }
-    const blob = findLargestBlob(diff, width, height, 0, waterlineY, 25);
-    trackingData.push({ frame: f, ...blob });
+    
+    const blobs = findAllBlobs(diff, width, height, 0, waterlineY, 25);
+    if (blobs.length > 0) {
+      trackingData.push({ frame: f, ...blobs[0] });
+      for (let i = 0; i < Math.min(5, blobs.length); i++) {
+        allBlobsData.push({ frame: f, ...blobs[i] });
+      }
+    }
   }
 
   onProgress(0.4, 'Analyzing jump trajectory...');
-  const detectedFrames = trackingData.filter(t => t.detected);
-  const significantFrames = detectedFrames.filter(t => t.area > 300);
+  
+  // Filter out noise, keeping all valid blobs across frames
+  const significantFrames = allBlobsData.filter(t => t.area > 20 && t.area < 5000);
   
   if (significantFrames.length < 3) {
     return {
       landingFrameIndex: null, landingX: null, confidence: 0, phases: [],
-      trajectory: detectedFrames.map(t => ({ frame: t.frame, x: t.cx / width, y: t.cy / height })),
+      trajectory: trackingData.map(t => ({ frame: t.frame, x: t.cx / width, y: t.cy / height })),
       error: 'Motion detected but no clear jump pattern found.'
     };
   }
