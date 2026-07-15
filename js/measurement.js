@@ -105,15 +105,15 @@ export function drawLine(ox, oy, vw, vh) {
     ctx.fillText('RAMP', rpx + 14, rpy + 4);
   }
   
-  // Draw full skier trajectory from allDetections (all track points as green polyline)
-  if (state.allDetections && state.allDetections.length > 0) {
+  // Draw full skier trajectory from ML and Blob tracking
+  if (state.trajectory && state.trajectory.length > 0) {
     const trackPts = [];
-    for (let f = 0; f < state.allDetections.length; f++) {
-      const det = state.allDetections[f];
+    for (let f = 0; f < state.trajectory.length; f++) {
+      const det = state.trajectory[f];
       if (!det) continue;
       trackPts.push({
-        x: ox + (det.box.x + det.box.w / 2) * vw,
-        y: oy + (det.box.y + det.box.h / 2) * vh,
+        x: ox + det.x * vw,
+        y: oy + det.y * vh,
       });
     }
     if (trackPts.length > 1) {

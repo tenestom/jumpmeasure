@@ -314,8 +314,8 @@ export async function analyzeJump(frames, calibPoints = [], onProgress = () => {
   const threshold = baselineScore + (peakScore - baselineScore) * 0.15;
   console.log(`[AI] Splash scan Y: ${splashScanY1}-${splashScanY2}. Baseline: ${baselineScore}, Peak: ${peakScore}`);
   
-  for (let f = totalFrames - 1; f >= peakFrame.frame; f--) {
-      if (splashScores[f] < threshold && splashScores[Math.min(totalFrames-1, f+1)] >= threshold) {
+  for (let f = peakFrame.frame + 5; f < totalFrames; f++) {
+      if (splashScores[f] >= threshold) {
           splashStartFrame = f;
           break;
       }

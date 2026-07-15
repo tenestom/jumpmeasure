@@ -301,6 +301,7 @@ if (aiDetectBtn) {
         state.blobBox = result.blobBox || null;
         state.predBlobBox = result.predBlobBox || null;
         state.aiFrameWidth = result.frameWidth || null;
+        state.trajectory = result.trajectory || [];
         state.allDetections = result.allDetections || [];
         state.aiWaterlineY = result.waterlineY || null;
         
