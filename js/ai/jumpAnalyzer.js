@@ -199,7 +199,7 @@ export async function analyzeJump(frames, calibPoints = [], onProgress = () => {
       const cropData = cropImageData(frames[f], cropX, cropY, cropW, cropH);
       cropCtx.putImageData(cropData, 0, 0);
       
-      const predictions = await mlModel.detect(cropCanvas, 10, 0.15);
+      const predictions = await mlModel.detect(cropCanvas, 10, 0.25);
       const person = predictions.find(p => p.class === 'person');
       
       if (person) {
