@@ -112,8 +112,13 @@ export async function analyzeJump(frames, calibPoints = [], onProgress = () => {
       const cropCtx = cropCanvas.getContext('2d', { willReadFrequently: true });
       const cropData = cropImageData(frames[candidate.frame], candidate.cx, candidate.cy, 300, 300);
       cropCtx.putImageData(cropData, 0, 0);
-      const predictions = await mlModel.detect(cropCanvas, 10, 0.20);
-      const person = predictions.find(p => p.class === 'person');
+      const predictions = await mlModel.detect(cropCanvas, 10, 0.15); // lowered back to 0.15 to find the tiny skier
+      const person = predictions.find(p => {
+          if (p.class !== 'person') return false;
+          const cx = p.bbox[0] + p.bbox[2]/2;
+          const cy = p.bbox[1] + p.bbox[3]/2;
+          return Math.abs(cx - 150) < 60 && Math.abs(cy - 150) < 60;
+      });
       
       if (person) {
          // 2. Validate that it is a falling object (skier) by tracking 5 frames forward
@@ -131,7 +136,12 @@ export async function analyzeJump(frames, calibPoints = [], onProgress = () => {
              const cData = cropImageData(frames[f], cX, cY, 300, 300);
              cropCtx.putImageData(cData, 0, 0);
              const preds = await mlModel.detect(cropCanvas, 10, 0.15);
-             const p2 = preds.find(p => p.class === 'person');
+             const p2 = preds.find(p => {
+                 if (p.class !== 'person') return false;
+                 const cx = p.bbox[0] + p.bbox[2]/2;
+                 const cy = p.bbox[1] + p.bbox[3]/2;
+                 return Math.abs(cx - 150) < 60 && Math.abs(cy - 150) < 60;
+             });
              if (p2) {
                  const newX = cX + p2.bbox[0] + p2.bbox[2]/2;
                  const newY = cY + p2.bbox[1] + p2.bbox[3]/2;
@@ -199,8 +209,14 @@ export async function analyzeJump(frames, calibPoints = [], onProgress = () => {
       const cropData = cropImageData(frames[f], cropX, cropY, cropW, cropH);
       cropCtx.putImageData(cropData, 0, 0);
       
-      const predictions = await mlModel.detect(cropCanvas, 10, 0.25);
-      const person = predictions.find(p => p.class === 'person');
+      const predictions = await mlModel.detect(cropCanvas, 10, 0.20);
+      const person = predictions.find(p => {
+          if (p.class !== 'person') return false;
+          // In tracking loop, crop is cropW x cropH, center is cropW/2, cropH/2
+          const cx = p.bbox[0] + p.bbox[2]/2;
+          const cy = p.bbox[1] + p.bbox[3]/2;
+          return Math.abs(cx - cropW/2) < Math.max(80, cropW/3) && Math.abs(cy - cropH/2) < Math.max(80, cropH/3);
+      });
       
       if (person) {
         currX = cropX + person.bbox[0] + person.bbox[2]/2;
