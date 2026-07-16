@@ -1,31 +1,14 @@
 /**
- * AI Jump Analyzer — Detects jump phases and landing point.
- * 
- * Uses frame differencing (no ML model) to:
- * 1. Detect the jumper's position per frame via motion analysis
- * 2. Classify jump phases: APPROACH → FLIGHT → LANDING → RIDE_AWAY
- * 3. Find the landing point (where back of ski hits water)
- * 
- * The landing point is defined as the small water "mound" that forms
- * where the back end of the ski contacts the water. Per official rules,
- * +2.1m is added to this measurement for the final jump distance.
- * 
- * All processing runs locally in the browser on the user's device.
+ * Jump Analyzer - Frame-by-frame AI tracking using COCO-SSD.
+ *
+ * Strategy:
+ * 1. Load COCO-SSD model.
+ * 2. Scan every frame from start to finish. For each frame, detect all persons.
+ * 3. Build a trajectory by linking detections across frames (nearest-neighbour linking).
+ * 4. The skier is the trajectory that is in the air (above waterline) and moving.
+ * 5. Landing = first frame where the skier crosses the waterline.
  */
 
-/**
- * Analyze an array of ImageData frames to detect the landing point.
- * 
- * @param {ImageData[]} frames - Array of video frames as ImageData
- * @param {Function} onProgress - Callback(progress: 0-1, message: string)
- * @returns {Promise<{
- *   landingFrameIndex: number,
- *   landingX: number,          // normalized 0..1
- *   confidence: number,        // 0..1
- *   phases: {start: number, end: number, type: string}[],
- *   trajectory: {frame: number, x: number, y: number}[]
- * }>}
- */
 export async function analyzeJump(frames, calibPoints = [], onProgress = () => {}) {
   if (!frames || frames.length < 10) {
     throw new Error('Need at least 10 frames for analysis');
@@ -35,429 +18,208 @@ export async function analyzeJump(frames, calibPoints = [], onProgress = () => {
   const height = frames[0].height;
   const totalFrames = frames.length;
 
-  onProgress(0, 'Initierar analys...');
-  const mlModel = null; // Removing ML completely
-
-
-  onProgress(0.05, 'Building background model...');
-
-  const bgFrameCount = Math.min(5, Math.floor(totalFrames * 0.1));
-  const bgGray = new Float32Array(width * height);
-  for (let f = 0; f < bgFrameCount; f++) {
-    const gray = toGrayscale(frames[f]);
-    for (let i = 0; i < gray.length; i++) {
-      bgGray[i] += gray[i] / bgFrameCount;
+  // --- Step 1: Load the AI model ---
+  onProgress(0, 'Laddar AI-modell...');
+  let mlModel = null;
+  if (window.cocoSsd) {
+    try {
+      mlModel = await window.cocoSsd.load();
+      console.log('[AI] COCO-SSD Model loaded.');
+    } catch (e) {
+      console.warn('[AI] Failed to load COCO-SSD', e);
     }
   }
 
-  onProgress(0.1, 'Detecting motion...');
-  const waterlineY = Math.floor(height * 0.55);
-  const trackingData = [];
-  const allBlobsData = [];
-  
-  let prevGray = toGrayscale(frames[0]);
-  
-  for (let f = 1; f < totalFrames; f++) {
-    onProgress(0.2 + 0.1 * (f / totalFrames), `Motion tracking frame ${f}...`);
-    await yieldToUI();
-    
-    const gray = toGrayscale(frames[f]);
-    const diff = new Uint8Array(width * height);
-    for (let i = 0; i < gray.length; i++) {
-      diff[i] = Math.min(255, Math.abs(gray[i] - prevGray[i]));
+  if (!mlModel) {
+    throw new Error('Kunde inte ladda AI-modellen. Kontrollera din internetanslutning.');
+  }
+
+  // --- Step 2: Detect waterline using first few frames ---
+  const bgGray = toGrayscale(frames[0]);
+  const waterlineY = findWaterline(bgGray, width, height);
+  console.log('[AI] Waterline at Y =', waterlineY);
+
+  // --- Step 3: Scan every frame, detect persons ---
+  // We scan the full frame but scale it down to 640px wide for speed.
+  const scanW = 640;
+  const scanH = Math.round(height * (scanW / width));
+  const scanCanvas = new OffscreenCanvas(scanW, scanH);
+  const scanCtx = scanCanvas.getContext('2d', { willReadFrequently: true });
+
+  // We'll draw each frame into a temporary canvas to resize it
+  const srcCanvas = new OffscreenCanvas(width, height);
+  const srcCtx = srcCanvas.getContext('2d', { willReadFrequently: true });
+
+  const scaleX = width / scanW;
+  const scaleY = height / scanH;
+  const waterlineScaled = waterlineY / scaleY;
+
+  // All raw person detections: { frame, cx, cy, score, bbox }
+  const allDetections = [];
+
+  for (let f = 0; f < totalFrames; f++) {
+    if (f % 3 === 0) {
+      onProgress(0.05 + 0.6 * (f / totalFrames), `Scannar ruta ${f} av ${totalFrames}...`);
+      await yieldToUI();
     }
-    prevGray = gray; // update prevGray for the next frame
-    
-    const blobs = findAllBlobs(diff, width, height, 0, waterlineY, 25);
-    if (blobs.length > 0) {
-      trackingData.push({ frame: f, ...blobs[0] });
-      for (let i = 0; i < Math.min(5, blobs.length); i++) {
-        allBlobsData.push({ frame: f, ...blobs[i] });
-      }
+
+    // Draw frame at scan resolution
+    srcCtx.putImageData(frames[f], 0, 0);
+    scanCtx.drawImage(srcCanvas, 0, 0, scanW, scanH);
+
+    const preds = await mlModel.detect(scanCanvas, 10, 0.10);
+    for (const p of preds) {
+      if (p.class !== 'person') continue;
+      const [bx, by, bw, bh] = p.bbox;
+      const cx = (bx + bw / 2) * scaleX;
+      const cy = (by + bh / 2) * scaleY;
+      allDetections.push({ frame: f, cx, cy, score: p.score,
+        bbox: { x: bx * scaleX, y: by * scaleY, w: bw * scaleX, h: bh * scaleY } });
     }
   }
 
-  onProgress(0.4, 'Analyzing jump trajectory...');
-  
-  // Filter out noise, keeping all valid blobs across frames
-  const significantFrames = allBlobsData.filter(t => t.area > 20 && t.area < 5000);
-  
-  if (significantFrames.length < 3) {
-    return {
-      landingFrameIndex: null, landingX: null, confidence: 0, phases: [],
-      trajectory: trackingData.map(t => ({ frame: t.frame, x: t.cx / width, y: t.cy / height })),
-      error: 'Motion detected but no clear jump pattern found.'
-    };
+  console.log(`[AI] Total person detections: ${allDetections.length}`);
+
+  if (allDetections.length === 0) {
+    throw new Error('Ingen person hittades i videon. Prova med ett annat klipp.');
   }
 
-  // Group all blobs into continuous tracks to filter out noise
-  const tracks = [];
-  for (const blob of significantFrames) {
-      let added = false;
-      for (const track of tracks) {
-          const last = track[track.length - 1];
-          // Must be close in time and space
-          if (blob.frame > last.frame && blob.frame - last.frame <= 5 && 
-              Math.abs(blob.cx - last.cx) < 80 && Math.abs(blob.cy - last.cy) < 80) {
-              track.push(blob);
-              added = true;
-              break;
-          }
+  // --- Step 4: Link detections into tracks ---
+  // Simple greedy nearest-neighbour: each detection joins the closest open track.
+  const tracks = []; // each track is array of detections
+
+  for (const det of allDetections) {
+    let bestTrack = null;
+    let bestDist = Infinity;
+
+    for (const track of tracks) {
+      const last = track[track.length - 1];
+      // Must be in the next few frames
+      if (det.frame <= last.frame || det.frame - last.frame > 8) continue;
+      const dist = Math.hypot(det.cx - last.cx, det.cy - last.cy);
+      if (dist < 120 && dist < bestDist) {
+        bestDist = dist;
+        bestTrack = track;
       }
-      if (!added) {
-          tracks.push([blob]);
-      }
+    }
+
+    if (bestTrack) {
+      bestTrack.push(det);
+    } else {
+      tracks.push([det]);
+    }
   }
 
-  // The true jump is the longest continuous motion track in the sky
-  let skierTrack = tracks.reduce((best, t) => t.length > best.length ? t : best, tracks[0]);
-  
-  if (!skierTrack || skierTrack.length < 5) {
-     return {
-        landingFrameIndex: null, landingX: null, confidence: 0, phases: [],
-        trajectory: trackingData.map(t => ({ frame: t.frame, x: t.cx / width, y: t.cy / height })),
-        error: 'No continuous jump trajectory found.'
-     };
+  console.log(`[AI] Built ${tracks.length} tracks.`);
+
+  // --- Step 5: Find the skier track ---
+  // The skier is the track that:
+  // a) Has the most detections
+  // b) Spends significant time ABOVE the waterline (in the air)
+  // c) Has a trajectory that starts higher and ends lower (falling arc)
+
+  // Score each track
+  const scoredTracks = tracks.map(track => {
+    const framesAboveWaterline = track.filter(d => d.cy < waterlineY).length;
+    const startY = track[0].cy;
+    const endY = track[track.length - 1].cy;
+    const drop = endY - startY; // positive = falls downward
+    const length = track.length;
+    // Score: length + bonus for being in air + bonus for having a drop
+    const score = length + framesAboveWaterline * 2 + Math.max(0, drop) * 0.1;
+    return { track, score, framesAboveWaterline, drop, length };
+  });
+
+  scoredTracks.sort((a, b) => b.score - a.score);
+
+  // Print top 3
+  for (let i = 0; i < Math.min(3, scoredTracks.length); i++) {
+    const s = scoredTracks[i];
+    console.log(`[AI] Track ${i}: length=${s.length}, inAir=${s.framesAboveWaterline}, drop=${s.drop.toFixed(0)}, score=${s.score.toFixed(1)}, frames ${s.track[0].frame}-${s.track[s.track.length-1].frame}`);
   }
 
-  let peakFrame = skierTrack.reduce((best, t) => t.cy < best.cy ? t : best, skierTrack[0]);
-  console.log('[AI] peakFrame:', peakFrame.frame);
+  const skierTrack = scoredTracks[0].track;
 
-  let splashY = null;
-  let landingX = null;
-  let mlTrack = [];
-  
-  // Replace ML tracking with basic extrapolation based on the skier track
-  if (skierTrack.length >= 2) {
-      const p1 = skierTrack[0];
-      const p2 = skierTrack[skierTrack.length - 1];
-      let velX = (p2.cx - p1.cx) / (p2.frame - p1.frame);
-      let velY = (p2.cy - p1.cy) / (p2.frame - p1.frame);
-      if (velY < 2) velY = 2; // gravity drop
-      
-      let currX = peakFrame.cx;
-      let currY = peakFrame.cy;
-      for (let f = peakFrame.frame; f < totalFrames; f++) {
-          mlTrack.push({ frame: f, cx: currX, cy: currY, detected: false });
-          splashY = currY;
-          landingX = currX;
-          currX += velX;
-          currY += velY;
-      }
-  } else {
-      splashY = peakFrame.cy + 50;
-      landingX = peakFrame.cx;
-  }
+  // --- Step 6: Build trajectory output ---
+  const trajectory = skierTrack.map(d => ({
+    frame: d.frame,
+    x: d.cx / width,
+    y: d.cy / height
+  }));
 
-  onProgress(0.8, 'Locating water mound...');
-
+  // --- Step 7: Find landing frame ---
+  // Landing = first frame in the skier track where the skier drops below waterline
+  // and stays below (i.e. the crossing point)
   let landingFrame = null;
-  const safeContactFrame = peakFrame.frame + 10;
-  
-  let rampMarkerX = 0, rampMarkerY = 0;
-  let rampNativeX = null, rampNativeY = null, rampNativeTopY = null;
-  let rampNativeStartX = null, rampNativeEndX = null;
-  let rampFullWidth = 200;
-  
-  const splashFrame = Math.min(safeContactFrame + 23, totalFrames - 1);
-  const splashGray = toGrayscale(frames[splashFrame]);
-  const preSplashGray = toGrayscale(frames[Math.max(0, splashFrame - 4)]);
-  
-  const splashRy1 = Math.floor(height * 0.35);
-  const splashRy2 = Math.floor(height * 0.48);
-  const colProfile = new Array(width).fill(0);
-  for (let y = splashRy1; y < splashRy2; y++) {
-    for (let x = 0; x < width; x++) {
-      const idx = y * width + x;
-      if (splashGray[idx] - preSplashGray[idx] > 30 && splashGray[idx] - bgGray[idx] > 30 && splashGray[idx] > 180) {
-        colProfile[x]++;
-      }
+  let landingX = skierTrack[skierTrack.length - 1].cx;
+
+  for (let i = 1; i < skierTrack.length; i++) {
+    const prev = skierTrack[i - 1];
+    const curr = skierTrack[i];
+    if (prev.cy < waterlineY && curr.cy >= waterlineY) {
+      // Linear interpolation to find exact crossing frame
+      const fraction = (waterlineY - prev.cy) / (curr.cy - prev.cy);
+      landingFrame = prev.frame + fraction;
+      landingX = prev.cx + fraction * (curr.cx - prev.cx);
+      console.log(`[AI] Landing detected at frame ${landingFrame.toFixed(1)}, X=${landingX.toFixed(0)}`);
+      break;
     }
   }
-  
-  const windowSize = 20;
-  let maxClusterVal = 0;
-  let maxClusterCol = 0;
-  for (let x = windowSize; x < width - windowSize; x++) {
-    let sum = 0;
-    for (let dx = -windowSize; dx <= windowSize; dx++) sum += colProfile[x+dx];
-    if (sum > maxClusterVal) { maxClusterVal = sum; maxClusterCol = x; }
-  }
-  
-  let leftSum = 0, rightSum = 0;
-  for (let x = 0; x < maxClusterCol - 50; x++) leftSum += colProfile[x];
-  for (let x = maxClusterCol + 50; x < width; x++) rightSum += colProfile[x];
-  
-  let rampIsRight = rightSum < leftSum;
-  console.log('[AI] Ramp side:', rampIsRight ? 'RIGHT' : 'LEFT');
 
-  let rampXStart = rampIsRight ? width - 400 : 0;
-  let rampXEnd = rampIsRight ? width : 400;
-  let rampZoneY1 = Math.floor(height * 0.2);
-  let rampZoneY2 = Math.floor(height * 0.35);
-
-  let clusterStarts = [];
-  let currentStart = null;
-  for(let x = rampXStart; x < rampXEnd; x++) {
-      let isStructure = false;
-      let varSum = 0;
-      for(let y = rampZoneY1; y < rampZoneY2; y+=4) {
-          varSum += Math.abs(bgGray[y*width + x] - bgGray[(y-4)*width + x]);
-      }
-      if(varSum > 60) isStructure = true;
-      if(isStructure && currentStart === null) currentStart = x;
-      if(!isStructure && currentStart !== null) {
-          clusterStarts.push({start: currentStart, end: x-1, width: x-currentStart});
-          currentStart = null;
-      }
+  // Fallback: if skier never crosses waterline cleanly, use the last frame
+  if (landingFrame === null) {
+    // Find the minimum Y (highest point) in the track, then the first point
+    // after that where Y is maximized (lowest point = in water)
+    const peakIdx = skierTrack.reduce((bestI, d, i) => d.cy < skierTrack[bestI].cy ? i : bestI, 0);
+    let maxY = -Infinity;
+    let landIdx = skierTrack.length - 1;
+    for (let i = peakIdx; i < skierTrack.length; i++) {
+      if (skierTrack[i].cy > maxY) { maxY = skierTrack[i].cy; landIdx = i; }
+    }
+    landingFrame = skierTrack[landIdx].frame;
+    landingX = skierTrack[landIdx].cx;
+    console.log(`[AI] Landing fallback at frame ${landingFrame}, X=${landingX.toFixed(0)}`);
   }
 
-  const validClusters = clusterStarts.filter(c => c.width >= 10 && c.width <= 150);
-  if (validClusters.length > 0) {
-      let targetCluster;
-      if (rampIsRight) {
-          targetCluster = validClusters.reduce((a, b) => b.end > a.end ? b : a);
-      } else {
-          targetCluster = validClusters.reduce((a, b) => a.start < b.start ? a : b);
-      }
-      rampNativeX = rampIsRight ? targetCluster.end : targetCluster.start;
-      rampNativeStartX = targetCluster.start;
-      rampNativeEndX = targetCluster.end;
-      rampNativeTopY = rampZoneY1;
-      rampNativeY = rampZoneY2;
-      rampMarkerX = rampNativeX;
-      rampMarkerY = rampNativeY;
-      rampFullWidth = targetCluster.width * 2.5;
-  }
+  // --- Step 8: Find peak (highest point in air) ---
+  const peakDet = skierTrack.reduce((best, d) => d.cy < best.cy ? d : best, skierTrack[0]);
+  console.log(`[AI] Peak at frame ${peakDet.frame}, Y=${peakDet.cy.toFixed(0)}`);
 
-  if (splashY === null) splashY = Math.floor(height * 0.85);
-
-  let searchStartX = 0;
-  let searchEndX = width;
-  if (rampNativeStartX !== null && rampNativeEndX !== null) {
-      if (rampIsRight) searchEndX = Math.max(0, rampNativeStartX - rampFullWidth);
-      else searchStartX = Math.min(width, rampNativeEndX + rampFullWidth);
-  }
-
-  let splashScores = new Array(totalFrames).fill(0);
-  let splashScanY1 = Math.max(0, Math.floor(splashY) - 20);
-  let splashScanY2 = Math.min(height, Math.floor(splashY) + 20);
-  
-  let splashStartFrame = null;
-  let baselineScore = 0;
-  let peakScore = 0;
-  
-  const peakGrayForBaseline = toGrayscale(frames[peakFrame.frame]);
-  for(let x=searchStartX; x<searchEndX; x++) {
-      let score = 0;
-      for(let y=splashScanY1; y<splashScanY2; y++) {
-          let val = peakGrayForBaseline[y*width+x];
-          if (val > 180) score += (val - 180);
-      }
-      baselineScore += score;
-  }
-  
-  for (let f = totalFrames - 1; f >= peakFrame.frame; f--) {
-      const g = toGrayscale(frames[f]);
-      let frameScore = 0;
-      for(let x=searchStartX; x<searchEndX; x++) {
-          let score = 0;
-          for(let y=splashScanY1; y<splashScanY2; y++) {
-              let val = g[y*width+x];
-              if (val > 180) score += (val - 180);
-          }
-          frameScore += score;
-      }
-      splashScores[f] = frameScore;
-      if (frameScore > peakScore) peakScore = frameScore;
-  }
-  
-  const threshold = baselineScore + (peakScore - baselineScore) * 0.15;
-  console.log(`[AI] Splash scan Y: ${splashScanY1}-${splashScanY2}. Baseline: ${baselineScore}, Peak: ${peakScore}`);
-  
-  for (let f = peakFrame.frame + 5; f < totalFrames; f++) {
-      if (splashScores[f] >= threshold) {
-          splashStartFrame = f;
-          break;
-      }
-  }
-
-  if (splashStartFrame !== null) {
-      landingFrame = splashStartFrame;
-      console.log(`[AI] Landing exactly at frame ${landingFrame}`);
-  } else {
-      landingFrame = peakFrame.frame + 60;
-      console.log('[AI] Splash transition not found, using fallback.');
-  }
-
-  const boxSize = 30;
-  const bestBlobBox = { x: landingX - boxSize/2, y: splashY - boxSize/2, width: boxSize, height: boxSize };
-  onProgress(1.0, 'Analysis complete');
-
-  const finalTrajectory = [];
-  for (let t of trackingData) {
-      if (t.frame < peakFrame.frame && t.detected) finalTrajectory.push({frame: t.frame, x: t.cx / width, y: t.cy / height});
-  }
-  for (let t of mlTrack) {
-      finalTrajectory.push({frame: t.frame, x: t.cx / width, y: t.cy / height});
-  }
+  onProgress(1.0, 'Klar!');
 
   return {
-    landingFrameIndex: landingFrame,
+    landingFrameIndex: Math.round(landingFrame),
     landingX: landingX / width,
-    confidence: mlModel ? 0.9 : 0.4,
+    confidence: 0.85,
     phases: [
-      { start: 0, end: peakFrame.frame, type: 'FLIGHT_ASCENT' },
-      { start: peakFrame.frame, end: landingFrame, type: 'FLIGHT_DESCENT' },
-      { start: landingFrame, end: totalFrames - 1, type: 'RIDE_AWAY' }
+      { start: skierTrack[0].frame, end: peakDet.frame, type: 'FLIGHT_ASCENT' },
+      { start: peakDet.frame, end: Math.round(landingFrame), type: 'FLIGHT_DESCENT' },
+      { start: Math.round(landingFrame), end: totalFrames - 1, type: 'RIDE_AWAY' }
     ],
-    trajectory: finalTrajectory,
-    rampMarker: { x: rampMarkerX, y: rampMarkerY },
-    rampNative: { x: rampNativeX, y: rampNativeY, topY: rampNativeTopY, startX: rampNativeStartX, endX: rampNativeEndX },
-    predBlobBox: bestBlobBox,
-    flightBox: bestBlobBox,
-    waterlineY: splashY / height
+    trajectory,
+    allDetections, // expose for rendering
+    rampMarker: { x: null, y: null },
+    rampNative: { x: null, y: null, topY: null, startX: null, endX: null },
+    predBlobBox: { x: landingX - 20, y: waterlineY - 20, width: 40, height: 40 },
+    flightBox: { x: landingX - 20, y: waterlineY - 20, width: 40, height: 40 },
+    waterlineY: waterlineY / height
   };
 }
 
-// --- Helper functions ---
-
-/**
- * Compute pixel variance in a rectangular region of a grayscale image.
- * Higher variance = more visual structure (ramp, objects vs plain water/sky).
- */
-function computeEdgeVariance(gray, imgWidth, imgHeight, x1, x2, y1, y2) {
-  let sum = 0, sumSq = 0, count = 0;
-  for (let y = y1; y < y2; y++) {
-    for (let x = x1; x < x2; x++) {
-      const val = gray[y * imgWidth + x];
-      sum += val;
-      sumSq += val * val;
-      count++;
-    }
-  }
-  if (count === 0) return 0;
-  const mean = sum / count;
-  return (sumSq / count) - (mean * mean);
-}
-
-/**
- * Convert ImageData to grayscale Float32Array.
- */
-function toGrayscale(imageData) {
-  const { data, width, height } = imageData;
-  const gray = new Float32Array(width * height);
-  for (let i = 0; i < width * height; i++) {
-    const r = data[i * 4];
-    const g = data[i * 4 + 1];
-    const b = data[i * 4 + 2];
-    gray[i] = 0.299 * r + 0.587 * g + 0.114 * b;
-  }
-  return gray;
-}
-
-/**
- * Find the largest motion blob in a region of the difference image.
- * Uses a simple connected-component approach via flood fill.
- */
-function findAllBlobs(diff, width, height, roiTop, roiBottom, threshold, roiLeft = 0, roiRight = null) {
-  if (roiRight === null) roiRight = width;
-  const visited = new Uint8Array(width * height);
-  const blobs = [];
-  
-  for (let y = roiTop; y < roiBottom; y++) {
-    for (let x = roiLeft; x < roiRight; x++) {
-      const idx = y * width + x;
-      if (visited[idx] || diff[idx] < threshold) continue;
-      
-      const component = floodFill(diff, visited, width, height, x, y, threshold, roiTop, roiBottom, roiLeft, roiRight);
-      
-      if (component.area > 20) {
-        const aspect = component.h / Math.max(component.w, 1);
-        if (aspect < 0.08 && component.area < 2000) continue;
-        blobs.push({
-          detected: true,
-          cx: component.cx, cy: component.cy,
-          area: component.area,
-          top: component.minY,
-          w: component.w, h: component.h,
-          bbox: { x: component.minX, y: component.minY, w: component.w, h: component.h }
-        });
-      }
-    }
-  }
-  return blobs.sort((a,b) => b.area - a.area);
-}
-
-/**
- * Simple flood fill to find connected components.
- */
-function floodFill(diff, visited, width, height, startX, startY, threshold, roiTop, roiBottom, roiLeft = 0, roiRight = null) {
-  if (roiRight === null) roiRight = width;
-  const stack = [[startX, startY]];
-  let sumX = 0, sumY = 0, count = 0;
-  let minX = startX, maxX = startX, minY = startY, maxY = startY;
-  
-  while (stack.length > 0) {
-    const [x, y] = stack.pop();
-    const idx = y * width + x;
-    
-    if (x < roiLeft || x >= roiRight || y < roiTop || y >= roiBottom) continue;
-    if (visited[idx]) continue;
-    if (diff[idx] < threshold) continue;
-    
-    visited[idx] = 1;
-    sumX += x;
-    sumY += y;
-    count++;
-    minX = Math.min(minX, x);
-    maxX = Math.max(maxX, x);
-    minY = Math.min(minY, y);
-    maxY = Math.max(maxY, y);
-    
-    // 4-connectivity (skip pixels for speed on large images)
-    stack.push([x + 2, y], [x - 2, y], [x, y + 2], [x, y - 2]);
-    // Also check immediate neighbors for better accuracy
-    stack.push([x + 1, y], [x - 1, y], [x, y + 1], [x, y - 1]);
-  }
-  
-  return {
-    cx: count > 0 ? Math.round(sumX / count) : 0,
-    cy: count > 0 ? Math.round(sumY / count) : 0,
-    area: count,
-    w: maxX - minX + 1,
-    h: maxY - minY + 1,
-    minX, maxX, minY, maxY
-  };
-}
-
-/**
- * Find the waterline Y coordinate — the horizontal boundary between
- * the shoreline/trees (background) and open water.
- * Works by finding the row with the strongest horizontal edge across
- * the full image width. Scans the middle 60% of the frame vertically
- * to avoid sky at the top and foreground water at the bottom.
- * Robust to both dark-shore/light-water and light-shore/dark-water.
- */
+// --- Helper: Compute waterline Y ---
 function findWaterline(bgGray, width, height) {
-  const scanTop    = Math.floor(height * 0.05);
+  const scanTop    = Math.floor(height * 0.10);
   const scanBottom = Math.floor(height * 0.70);
-  const checkRows  = 25; // rows to sample above and below
-  const sampleStep = 4;  // sample every 4th pixel for speed
-  
-  // For each candidate row: score = variance_above - variance_below
-  // Shoreline: trees above (high var) + water below (low var) → high score
-  // Wake:      water above (low var) + water below (low var) → near zero
-  // Sky/tree:  sky above (low var)  + trees below (high var) → negative
-  
-  let bestY = Math.floor(height * 0.22);
+  const checkRows  = 20;
+  const sampleStep = 4;
+
+  let bestY = Math.floor(height * 0.35);
   let bestScore = -Infinity;
-  
+
   for (let y = scanTop + checkRows; y < scanBottom - checkRows; y++) {
     let sumA = 0, sumSqA = 0, cntA = 0;
     let sumB = 0, sumSqB = 0, cntB = 0;
-    
-    // Sample rows ABOVE
+
     for (let dy = 1; dy <= checkRows; dy++) {
       const yy = y - dy;
       for (let x = 0; x < width; x += sampleStep) {
@@ -465,7 +227,6 @@ function findWaterline(bgGray, width, height) {
         sumA += v; sumSqA += v * v; cntA++;
       }
     }
-    // Sample rows BELOW
     for (let dy = 1; dy <= checkRows; dy++) {
       const yy = y + dy;
       for (let x = 0; x < width; x += sampleStep) {
@@ -473,69 +234,28 @@ function findWaterline(bgGray, width, height) {
         sumB += v; sumSqB += v * v; cntB++;
       }
     }
-    
+
     const varA = cntA > 0 ? (sumSqA / cntA) - (sumA / cntA) ** 2 : 0;
     const varB = cntB > 0 ? (sumSqB / cntB) - (sumB / cntB) ** 2 : 0;
-    const score = varA - varB; // high = trees above, water below = shoreline
-    
-    if (score > bestScore) {
-      bestScore = score;
-      bestY = y;
-    }
+    const score = varA - varB;
+
+    if (score > bestScore) { bestScore = score; bestY = y; }
   }
-  
-  console.log('[AI] Waterline (var_above - var_below): Y=', bestY, 'score=', bestScore.toFixed(1));
+
   return bestY;
 }
 
-/**
- * Simple 1D linear regression: fit y = slope*x + intercept.
- */
-function fitLinear1D(xs, ys) {
-  const n = xs.length;
-  if (n < 2) return { slope: 0, intercept: ys[0] || 0 };
-  let sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0;
-  for (let i = 0; i < n; i++) {
-    sumX += xs[i]; sumY += ys[i];
-    sumXY += xs[i] * ys[i]; sumX2 += xs[i] * xs[i];
+// --- Helper: Convert ImageData to grayscale Float32Array ---
+function toGrayscale(imageData) {
+  const { data, width, height } = imageData;
+  const gray = new Float32Array(width * height);
+  for (let i = 0; i < width * height; i++) {
+    gray[i] = 0.299 * data[i*4] + 0.587 * data[i*4+1] + 0.114 * data[i*4+2];
   }
-  const denom = n * sumX2 - sumX * sumX;
-  if (Math.abs(denom) < 1e-9) return { slope: 0, intercept: sumY / n };
-  const slope = (n * sumXY - sumX * sumY) / denom;
-  const intercept = (sumY - slope * sumX) / n;
-  return { slope, intercept };
+  return gray;
 }
 
-/**
- * Yield control to the UI thread to prevent freezing.
- */
+// --- Helper: Yield to UI ---
 function yieldToUI() {
   return new Promise(resolve => setTimeout(resolve, 0));
-}
-
-/**
- * Extract a cropped rectangular region from an ImageData object.
- */
-function cropImageData(srcImageData, x, y, width, height) {
-  const crop = new ImageData(width, height);
-  const src = srcImageData.data;
-  const dst = crop.data;
-  const srcW = srcImageData.width;
-  const srcH = srcImageData.height;
-  
-  for (let cy = 0; cy < height; cy++) {
-    for (let cx = 0; cx < width; cx++) {
-      const srcX = Math.max(0, Math.min(srcW - 1, Math.floor(x) + cx));
-      const srcY = Math.max(0, Math.min(srcH - 1, Math.floor(y) + cy));
-      
-      const srcIdx = (srcY * srcW + srcX) * 4;
-      const dstIdx = (cy * width + cx) * 4;
-      
-      dst[dstIdx] = src[srcIdx];
-      dst[dstIdx+1] = src[srcIdx+1];
-      dst[dstIdx+2] = src[srcIdx+2];
-      dst[dstIdx+3] = src[srcIdx+3];
-    }
-  }
-  return crop;
 }
