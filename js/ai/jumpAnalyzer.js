@@ -35,18 +35,9 @@ export async function analyzeJump(frames, calibPoints = [], onProgress = () => {
   const height = frames[0].height;
   const totalFrames = frames.length;
 
-  onProgress(0, 'Laddar AI-modell...');
-  let mlModel = null;
-  if (window.cocoSsd) {
-    try {
-      mlModel = await window.cocoSsd.load();
-      console.log('[AI] COCO-SSD Model loaded.');
-    } catch (e) {
-      console.warn('[AI] Failed to load COCO-SSD', e);
-    }
-  } else {
-    console.warn('[AI] window.cocoSsd is not available.');
-  }
+  onProgress(0, 'Initierar analys...');
+  const mlModel = null; // Removing ML completely
+
 
   onProgress(0.05, 'Building background model...');
 
@@ -99,151 +90,63 @@ export async function analyzeJump(frames, calibPoints = [], onProgress = () => {
     };
   }
 
-  const cropCanvas = new OffscreenCanvas(300, 300);
-  const cropCtx = cropCanvas.getContext('2d', { willReadFrequently: true });
-  
-  let peakFrame = significantFrames[0];
-  if (mlModel) {
-    onProgress(0.4, 'Verifying peak candidates with ML...');
-    const candidatePeaks = [...significantFrames].sort((a, b) => a.cy - b.cy);
-    for (const candidate of candidatePeaks) {
-      // 1. Initial detection at candidate
-      const cropCanvas = new OffscreenCanvas(300, 300);
-      const cropCtx = cropCanvas.getContext('2d', { willReadFrequently: true });
-      const cropData = cropImageData(frames[candidate.frame], candidate.cx, candidate.cy, 300, 300);
-      cropCtx.putImageData(cropData, 0, 0);
-      const predictions = await mlModel.detect(cropCanvas, 10, 0.10); // Hyper-sensitive to catch tiny skier
-      const person = predictions.find(p => {
-          if (p.class !== 'person') return false;
-          const cx = p.bbox[0] + p.bbox[2]/2;
-          const cy = p.bbox[1] + p.bbox[3]/2;
-          return Math.abs(cx - 150) < 100 && Math.abs(cy - 150) < 100;
-      });
-      
-      if (person) {
-         // 2. Validate that it is a falling object (skier) by tracking 5 frames forward
-         let validTrack = true;
-         let currX = candidate.cx - 150 + person.bbox[0] + person.bbox[2]/2;
-         let currY = candidate.cy - 150 + person.bbox[1] + person.bbox[3]/2;
-         let velX = 0, velY = 2; // assume some downward velocity
-         
-         let successfulFrames = 0;
-         const testFrames = Math.min(10, totalFrames - candidate.frame - 1);
-         for (let i = 1; i <= testFrames; i++) {
-             const f = candidate.frame + i;
-             const cX = currX + velX - 150;
-             const cY = currY + velY - 150;
-             const cData = cropImageData(frames[f], cX, cY, 300, 300);
-             cropCtx.putImageData(cData, 0, 0);
-             const preds = await mlModel.detect(cropCanvas, 10, 0.10);
-             const p2 = preds.find(p => {
-                 if (p.class !== 'person') return false;
-                 const cx = p.bbox[0] + p.bbox[2]/2;
-                 const cy = p.bbox[1] + p.bbox[3]/2;
-                 return Math.abs(cx - 150) < 100 && Math.abs(cy - 150) < 100;
-             });
-             if (p2) {
-                 const newX = cX + p2.bbox[0] + p2.bbox[2]/2;
-                 const newY = cY + p2.bbox[1] + p2.bbox[3]/2;
-                 velX = newX - currX;
-                 velY = newY - currY;
-                 currX = newX;
-                 currY = newY;
-                 successfulFrames++;
-             } else {
-                 currX += velX;
-                 currY += velY;
-             }
-         }
-         
-         // If we tracked it successfully for at least 3 of the next 10 frames, and it fell downwards
-         if (successfulFrames >= 3 && currY > candidate.cy + 10) {
-             peakFrame = candidate;
-             console.log(`[AI] ML Confirmed true peak at frame ${candidate.frame} (Y=${candidate.cy}, Tracked downwards!)`);
-             break;
-         } else {
-             console.log(`[AI] Rejected candidate peak at frame ${candidate.frame} (Found object, but didn't fall like a skier)`);
-         }
-      } else {
-         console.log(`[AI] Rejected candidate peak at frame ${candidate.frame} (No person found)`);
+  // Group all blobs into continuous tracks to filter out noise
+  const tracks = [];
+  for (const blob of significantFrames) {
+      let added = false;
+      for (const track of tracks) {
+          const last = track[track.length - 1];
+          // Must be close in time and space
+          if (blob.frame > last.frame && blob.frame - last.frame <= 5 && 
+              Math.abs(blob.cx - last.cx) < 80 && Math.abs(blob.cy - last.cy) < 80) {
+              track.push(blob);
+              added = true;
+              break;
+          }
       }
-    }
-  } else {
-    peakFrame = significantFrames.reduce((best, t) => t.cy < best.cy ? t : best, significantFrames[0]);
+      if (!added) {
+          tracks.push([blob]);
+      }
   }
+
+  // The true jump is the longest continuous motion track in the sky
+  let skierTrack = tracks.reduce((best, t) => t.length > best.length ? t : best, tracks[0]);
+  
+  if (!skierTrack || skierTrack.length < 5) {
+     return {
+        landingFrameIndex: null, landingX: null, confidence: 0, phases: [],
+        trajectory: trackingData.map(t => ({ frame: t.frame, x: t.cx / width, y: t.cy / height })),
+        error: 'No continuous jump trajectory found.'
+     };
+  }
+
+  let peakFrame = skierTrack.reduce((best, t) => t.cy < best.cy ? t : best, skierTrack[0]);
   console.log('[AI] peakFrame:', peakFrame.frame);
 
   let splashY = null;
   let landingX = null;
   let mlTrack = [];
   
-  if (mlModel) {
-    onProgress(0.5, 'ML Tracking skier...');
-    let currX = peakFrame.cx;
-    let currY = peakFrame.cy;
-    const cropW = 300, cropH = 300;
-    
-    const cropCanvas = new OffscreenCanvas(cropW, cropH);
-    const cropCtx = cropCanvas.getContext('2d', { willReadFrequently: true });
-    
-    let velX = 0, velY = 5;
-    const prePeak = trackingData.filter(t => t.frame <= peakFrame.frame && t.detected);
-    if (prePeak.length >= 2) {
-      const p1 = prePeak[0];
-      const p2 = prePeak[prePeak.length - 1];
-      if (p2.frame > p1.frame) {
-        velX = (p2.cx - p1.cx) / (p2.frame - p1.frame);
-        velY = (p2.cy - p1.cy) / (p2.frame - p1.frame);
-      }
-    }
-    if (velY < 2) velY = 2; // ensure it drops downwards
-
-    for (let f = peakFrame.frame; f < totalFrames; f++) {
-      if (f % 2 === 0) {
-        onProgress(0.5 + 0.3 * ((f - peakFrame.frame) / (totalFrames - peakFrame.frame)), `ML Tracking frame ${f}...`);
-        await yieldToUI();
-      }
+  // Replace ML tracking with basic extrapolation based on the skier track
+  if (skierTrack.length >= 2) {
+      const p1 = skierTrack[0];
+      const p2 = skierTrack[skierTrack.length - 1];
+      let velX = (p2.cx - p1.cx) / (p2.frame - p1.frame);
+      let velY = (p2.cy - p1.cy) / (p2.frame - p1.frame);
+      if (velY < 2) velY = 2; // gravity drop
       
-      const cropX = currX - cropW / 2;
-      const cropY = currY - cropH / 2;
-      const cropData = cropImageData(frames[f], cropX, cropY, cropW, cropH);
-      cropCtx.putImageData(cropData, 0, 0);
-      
-      const predictions = await mlModel.detect(cropCanvas, 10, 0.20);
-      const person = predictions.find(p => {
-          if (p.class !== 'person') return false;
-          // In tracking loop, crop is cropW x cropH, center is cropW/2, cropH/2
-          const cx = p.bbox[0] + p.bbox[2]/2;
-          const cy = p.bbox[1] + p.bbox[3]/2;
-          return Math.abs(cx - cropW/2) < 60 && Math.abs(cy - cropH/2) < 60;
-      });
-      
-      if (person) {
-        currX = cropX + person.bbox[0] + person.bbox[2]/2;
-        currY = cropY + person.bbox[1] + person.bbox[3]/2;
-        
-        if (mlTrack.length >= 1) {
-            velX = currX - mlTrack[mlTrack.length-1].cx;
-            velY = currY - mlTrack[mlTrack.length-1].cy;
-        }
-        
-        mlTrack.push({ frame: f, cx: currX, cy: currY, detected: true });
-        splashY = currY; 
-        landingX = currX;
-        console.log(`[AI] ML Frame ${f}: Detected ${person.class} at ${currX.toFixed(1)}, ${currY.toFixed(1)}`);
-      } else {
-        currX += velX;
-        currY += velY;
-        
-        mlTrack.push({ frame: f, cx: currX, cy: currY, detected: false });
-        splashY = currY;
-        landingX = currX;
-        console.log(`[AI] ML Frame ${f}: Extrapolated to ${currX.toFixed(1)}, ${currY.toFixed(1)}`);
+      let currX = peakFrame.cx;
+      let currY = peakFrame.cy;
+      for (let f = peakFrame.frame; f < totalFrames; f++) {
+          mlTrack.push({ frame: f, cx: currX, cy: currY, detected: false });
+          splashY = currY;
+          landingX = currX;
+          currX += velX;
+          currY += velY;
       }
-    }
   } else {
-    splashY = Math.floor(height * 0.85);
-    landingX = width / 2;
+      splashY = peakFrame.cy + 50;
+      landingX = peakFrame.cx;
   }
 
   onProgress(0.8, 'Locating water mound...');
